@@ -1,0 +1,14 @@
+{
+  "name": "qvk-moderator",
+  "version": "1.2.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test",
+    "deploy": "wrangler deploy",
+    "db:init": "wrangler d1 execute qvk-moderator-db --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
