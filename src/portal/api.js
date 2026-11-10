@@ -1,7 +1,7 @@
 // QVK Beta Portal — JSON API router (/api/p/*).
 import { META, LIMITS } from "./constants.js";
 import { now, fail, json, clean, oneOf, readJson, getSetting, setSetting, bump, displayName, csvCell, admins, rateLimit, HttpError } from "./util.js";
-import { loadSession, startLogin, pollLogin, widgetLogin, logout } from "./auth.js";
+import { loadSession, register, login, logout, changePassword, adminResetPassword, startTelegramLink, unlinkTelegram, adminUserIds } from "./auth.js";
 import { botUsername } from "./telegram.js";
 import { upload } from "./files.js";
 import * as T from "./tickets.js";
@@ -17,7 +17,6 @@ async function me(e, ses) {
   };
   if (ses.isAdmin) {
     settings.notify_admins = (await getSetting(e, "notify_admins", "on")) === "on";
-    settings.login_widget = (await getSetting(e, "login_widget", "off")) === "on";
     settings.welcome = await getSetting(e, "welcome", "");
   }
   const active = devices.find((d) => d.id === ses.user.active_device) ? ses.user.active_device : devices[0]?.id ?? null;
@@ -72,7 +71,7 @@ async function deleteProfile(req, e, ses) {
     e.DB.prepare("DELETE FROM portal_notifications WHERE user_id=?").bind(id),
     e.DB.prepare("DELETE FROM portal_sessions WHERE user_id=?").bind(id),
     // Reports stay (they belong to the project) but are de-personalised.
-    e.DB.prepare("UPDATE portal_users SET first_name='',last_name=NULL,username=NULL,photo_url=NULL,active_device=NULL,notify_tg=0,deleted=1 WHERE id=?").bind(id),
+    e.DB.prepare("UPDATE portal_users SET first_name='',last_name=NULL,username=NULL,photo_url=NULL,active_device=NULL,notify_tg=0,nick=NULL,nick_lc=NULL,pass_hash=NULL,tg_id=NULL,deleted=1 WHERE id=?").bind(id),
   ]);
   return logout(req, e, null);
 }
@@ -100,7 +99,7 @@ async function adminStats(e) {
   }
   const topIdeas = (await e.DB.prepare("SELECT code,title,status,votes FROM portal_tickets WHERE kind='idea' AND duplicate_of IS NULL ORDER BY votes DESC,id DESC LIMIT 5").all()).results || [];
   const testers = (await e.DB.prepare(
-    `SELECT u.id,u.first_name,u.last_name,u.username,u.last_seen,
+    `SELECT u.id,u.nick,u.first_name,u.last_name,u.username,u.last_seen,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.created>=?) tickets,
       (SELECT COUNT(*) FROM portal_comments c WHERE c.user_id=u.id AND c.created>=? AND c.deleted=0) comments
      FROM portal_users u WHERE u.deleted=0 ORDER BY tickets DESC, comments DESC, u.last_seen DESC LIMIT 10`,
@@ -120,17 +119,17 @@ async function adminStats(e) {
   };
 }
 
-async function adminUsers(e) {
+async function adminUsers(e, ses) {
   const rows = (await e.DB.prepare(
-    `SELECT u.id,u.first_name,u.last_name,u.username,u.created,u.last_seen,u.banned,u.notify_tg,u.tg_blocked,
+    `SELECT u.id,u.nick,u.first_name,u.last_name,u.username,u.created,u.last_seen,u.banned,u.notify_tg,u.tg_blocked,u.tg_id,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='bug') bugs,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='idea') ideas,
       (SELECT COUNT(*) FROM portal_comments c WHERE c.user_id=u.id AND c.deleted=0) comments,
       (SELECT model||' · Android '||android||' · '||app_version FROM portal_devices d WHERE d.user_id=u.id ORDER BY d.updated DESC LIMIT 1) device
      FROM portal_users u WHERE u.deleted=0 ORDER BY u.last_seen DESC LIMIT 500`,
   ).all()).results || [];
-  const adm = admins(e);
-  return { items: rows.map((u) => ({ ...u, name: displayName(u), is_admin: adm.has(u.id), banned: !!u.banned })) };
+  const adm = ses.admins;
+  return { items: rows.map(({ tg_id, ...u }) => ({ ...u, tg_linked: !!tg_id, name: displayName(u), is_admin: adm.has(u.id), banned: !!u.banned })) };
 }
 
 async function adminSettings(e, body) {
@@ -139,7 +138,7 @@ async function adminSettings(e, body) {
     if (!v) fail(400, "Укажите версию");
     await setSetting(e, "current_version", v);
   }
-  for (const k of ["comments_public", "notify_admins", "login_widget"]) if (body[k] !== undefined) await setSetting(e, k, body[k] ? "on" : "off");
+  for (const k of ["comments_public", "notify_admins"]) if (body[k] !== undefined) await setSetting(e, k, body[k] ? "on" : "off");
   if (body.welcome !== undefined) await setSetting(e, "welcome", clean(body.welcome, 600));
   await bump(e);
   return { ok: true };
@@ -165,13 +164,13 @@ async function exportData(e, q) {
   const kind = oneOf(q.get("kind"), ["bug", "idea", "all"], "all");
   const format = oneOf(q.get("format"), ["json", "csv"], "json");
   const rows = (await e.DB.prepare(
-    `SELECT t.*,u.first_name,u.last_name,u.username,d.code AS duplicate_code FROM portal_tickets t LEFT JOIN portal_users u ON u.id=t.author_id LEFT JOIN portal_tickets d ON d.id=t.duplicate_of
+    `SELECT t.*,u.nick,u.first_name,u.last_name,u.username,d.code AS duplicate_code FROM portal_tickets t LEFT JOIN portal_users u ON u.id=t.author_id LEFT JOIN portal_tickets d ON d.id=t.duplicate_of
      ${kind === "all" ? "" : "WHERE t.kind=?"} ORDER BY t.id`,
   ).bind(...(kind === "all" ? [] : [kind])).all()).results || [];
   const iso = (s) => (s ? new Date(s * 1000).toISOString() : "");
   const items = rows.map((r) => ({
     code: r.code, kind: r.kind, category: r.category, title: r.title, status: r.status, priority: r.priority,
-    author_id: r.author_id, author: displayName({ id: r.author_id, first_name: r.first_name, last_name: r.last_name, username: r.username }), author_username: r.username || "",
+    author_id: r.author_id, author: displayName({ id: r.author_id, nick: r.nick, first_name: r.first_name, last_name: r.last_name, username: r.username }), author_username: r.username || "",
     device: r.device_model || "", android: r.android || "", app_version: r.app_version || "", firmware: r.firmware || "",
     frequency: r.frequency || "", description: r.description, steps: r.steps, expected: r.expected, actual: r.actual,
     how_it_works: r.how_it_works, purpose: r.purpose, fixed_version: r.fixed_version || "", status_note: r.status_note || "",
@@ -211,9 +210,8 @@ export async function handleApi(req, e, ctx, url) {
   // ---- unauthenticated endpoints ----
   if (seg[0] === "auth") {
     if (req.headers.get("x-qvk") !== "1") fail(403, "Отсутствует заголовок запроса");
-    if (seg[1] === "start" && method === "POST") return startLogin(req, e);
-    if (seg[1] === "poll" && method === "GET") return pollLogin(req, e);
-    if (seg[1] === "widget" && method === "POST") return widgetLogin(req, e, await readJson(req));
+    if (seg[1] === "register" && method === "POST") return register(req, e, await readJson(req, 4000));
+    if (seg[1] === "login" && method === "POST") return login(req, e, await readJson(req, 4000));
     if (seg[1] === "logout" && method === "POST") return logout(req, e, await loadSession(req, e));
     fail(404, "Не найдено");
   }
@@ -221,12 +219,12 @@ export async function handleApi(req, e, ctx, url) {
     return json({
       version: await getSetting(e, "current_version", "3.0"),
       bot: await botUsername(e),
-      login_widget: (await getSetting(e, "login_widget", "off")) === "on",
     });
   }
 
   const ses = await loadSession(req, e);
   if (!ses) fail(401, "Требуется вход");
+  ses.admins = await adminUserIds(e);
   if (MUTATING.has(method) && req.headers.get("x-csrf") !== ses.session.csrf) fail(403, "Сессия устарела, обновите страницу");
 
   // ---- tester endpoints ----
@@ -244,6 +242,9 @@ export async function handleApi(req, e, ctx, url) {
     }
     if (method === "DELETE") return deleteProfile(req, e, ses);
   }
+  if (path === "/me/password" && method === "POST") return changePassword(req, e, ses, await readJson(req, 4000));
+  if (path === "/tg/link" && method === "POST") return startTelegramLink(req, e, ses);
+  if (path === "/tg/unlink" && method === "POST") return unlinkTelegram(e, ses);
   if (seg[0] === "devices") {
     if (method === "POST" && seg.length === 1) return json(await saveDevice(e, ses, null, await readJson(req)));
     if (method === "PUT" && seg[1]) return json(await saveDevice(e, ses, seg[1], await readJson(req)));
@@ -323,10 +324,14 @@ export async function handleApi(req, e, ctx, url) {
     if (seg[1] === "merge" && method === "POST") return json(await T.adminMerge(e, ctx, ses, await readJson(req)));
     if (seg[1] === "export" && method === "GET") return exportData(e, q);
     if (seg[1] === "settings" && method === "POST") return json(await adminSettings(e, await readJson(req)));
-    if (seg[1] === "users" && !seg[2] && method === "GET") return json(await adminUsers(e));
+    if (seg[1] === "users" && !seg[2] && method === "GET") return json(await adminUsers(e, ses));
     if (seg[1] === "users" && seg[2] && method === "POST") {
       const b = await readJson(req);
-      if (admins(e).has(seg[2])) fail(400, "Нельзя заблокировать администратора");
+      if (b.password !== undefined) {
+        await adminResetPassword(e, seg[2], b.password);
+        return json({ ok: true });
+      }
+      if (ses.admins.has(seg[2])) fail(400, "Нельзя заблокировать администратора");
       await e.DB.prepare("UPDATE portal_users SET banned=? WHERE id=?").bind(b.banned ? 1 : 0, seg[2]).run();
       if (b.banned) await e.DB.prepare("DELETE FROM portal_sessions WHERE user_id=?").bind(seg[2]).run();
       return json({ ok: true });

@@ -2,7 +2,7 @@
 // Run automatically by `npm run deploy` (predeploy) and `npm test` (pretest).
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { SCHEMA } from "../src/portal/schema.js";
+import { SCHEMA, MIGRATION_V2 } from "../src/portal/schema.js";
 
 const root = new URL("../", import.meta.url);
 const js = readFileSync(new URL("src/portal/web/app.js", root), "utf8");
@@ -18,5 +18,9 @@ writeFileSync(
 writeFileSync(
   new URL("migrations/0001_portal.sql", root),
   "-- QVK Beta Portal: additive schema (portal_* tables only). Safe to re-run.\n" + SCHEMA.map((s) => s + ";").join("\n") + "\n",
+);
+writeFileSync(
+  new URL("migrations/0002_portal_nick_auth.sql", root),
+  "-- QVK Beta Portal v2: nickname + password accounts, optional Telegram link.\n" + MIGRATION_V2.map((s) => s + ";").join("\n") + "\n",
 );
 console.log("portal assets built", hash);

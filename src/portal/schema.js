@@ -2,7 +2,18 @@
 // existing moderator tables are never touched. The same statements are
 // written to migrations/0001_portal.sql by scripts/build-portal.mjs.
 
-export const SCHEMA_VERSION = "1";
+export const SCHEMA_VERSION = "2";
+
+// v2: nickname + password accounts; Telegram is linked optionally (DMs, admin rights).
+export const MIGRATION_V2 = [
+  `ALTER TABLE portal_users ADD COLUMN nick TEXT`,
+  `ALTER TABLE portal_users ADD COLUMN nick_lc TEXT`,
+  `ALTER TABLE portal_users ADD COLUMN pass_hash TEXT`,
+  `ALTER TABLE portal_users ADD COLUMN tg_id TEXT`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS portal_users_nick ON portal_users(nick_lc)`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS portal_users_tg ON portal_users(tg_id)`,
+  `CREATE TABLE IF NOT EXISTS portal_links(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,tg_user TEXT,created INTEGER NOT NULL,expires INTEGER NOT NULL)`,
+];
 
 export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS portal_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)`,
@@ -42,13 +53,20 @@ let ready = null;
 export async function ensureSchema(e) {
   if (ready) return ready;
   ready = (async () => {
+    let version = "0";
     try {
       const row = await e.DB.prepare("SELECT value FROM portal_settings WHERE key='schema_version'").first();
-      if (row?.value === SCHEMA_VERSION) return true;
+      version = row?.value || "0";
+      if (version === SCHEMA_VERSION) return true;
     } catch {
       /* table missing — create below */
     }
-    await e.DB.batch(SCHEMA.map((sql) => e.DB.prepare(sql)));
+    if (version < "1") await e.DB.batch(SCHEMA.map((sql) => e.DB.prepare(sql)));
+    if (version < "2") {
+      const cols = new Set(((await e.DB.prepare("PRAGMA table_info(portal_users)").all()).results || []).map((c) => c.name));
+      const stmts = MIGRATION_V2.filter((sql) => !/ADD COLUMN (\w+)/.test(sql) || !cols.has(sql.match(/ADD COLUMN (\w+)/)[1]));
+      for (const sql of stmts) await e.DB.prepare(sql).run();
+    }
     await e.DB.prepare(
       "INSERT INTO portal_settings(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     ).bind(SCHEMA_VERSION).run();

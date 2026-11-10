@@ -1,7 +1,7 @@
 // QVK Beta Portal — entry point mounted inside the existing qvk-moderator Worker.
 import { ensureSchema } from "./schema.js";
 import { handleApi, apiError } from "./api.js";
-import { loadSession, verifyWidget, upsertUser, createSession } from "./auth.js";
+import { loadSession, adminUserIds } from "./auth.js";
 import { serveFile } from "./files.js";
 import { canSeeTicketId } from "./tickets.js";
 import { json, SECURITY_HEADERS, getSetting, HttpError } from "./util.js";
@@ -14,18 +14,17 @@ const PAGES = new Set(["/", "/login", "/my", "/all", "/known", "/fixes", "/updat
 
 /** Paths owned by the portal. Existing moderator routes (/app, /bug-form, /api/app, /webhook…) are untouched. */
 export function isPortalPath(p) {
-  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/auth/telegram" || p === "/favicon.svg" || p === "/manifest.webmanifest";
+  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/manifest.webmanifest";
 }
 
 const CSP = [
   "default-src 'self'",
-  "script-src 'self' https://telegram.org",
+  "script-src 'self'",
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://t.me https://*.telegram.org https://telegram.org https://*.telesco.pe",
   "media-src 'self' blob:",
   "connect-src 'self'",
-  "frame-src https://oauth.telegram.org",
-  "object-src 'none'",
+    "object-src 'none'",
   "base-uri 'none'",
   "form-action 'self'",
   "frame-ancestors 'none'",
@@ -92,18 +91,8 @@ export async function portal(req, e, ctx) {
       if (!["GET", "HEAD"].includes(req.method)) return new Response("Method Not Allowed", { status: 405 });
       const ses = await loadSession(req, e);
       if (!ses) return new Response("Требуется вход", { status: 401 });
+      ses.admins = await adminUserIds(e);
       return await serveFile(req, e, ses, p.slice(7), (tid) => canSeeTicketId(e, ses, tid));
-    }
-    if (p === "/auth/telegram") {
-      // Redirect flow of the official Telegram Login Widget.
-      if ((await getSetting(e, "login_widget", "off")) !== "on") return Response.redirect(url.origin + "/login", 302);
-      const data = Object.fromEntries(url.searchParams.entries());
-      const ok = await verifyWidget(e, data);
-      if (!ok) return Response.redirect(url.origin + "/login?error=widget", 302);
-      const banned = await e.DB.prepare("SELECT banned FROM portal_users WHERE id=?").bind(String(ok.id)).first();
-      if (banned?.banned) return Response.redirect(url.origin + "/login?error=banned", 302);
-      await upsertUser(e, ok);
-      return new Response(null, { status: 302, headers: { location: "/", "set-cookie": await createSession(req, e, ok.id), "cache-control": "no-store" } });
     }
     if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method Not Allowed", { status: 405 });
     return html(shell());

@@ -2,7 +2,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { createHmac, createHash } from "node:crypto";
 import { createD1 } from "./helpers/d1.js";
 import worker from "../src/index.js";
 import { resetSchemaCache } from "../src/portal/schema.js";
@@ -61,31 +60,31 @@ async function webhook(env, update) {
   return call(env, "/webhook", { method: "POST", body: { update_id: ++updateId, ...update }, headers: { "X-Telegram-Bot-Api-Secret-Token": "hook-secret" } });
 }
 
-/** Full login through the bot. Returns {cookie, csrf, me}. */
-async function login(env, userId, first = "User" + userId) {
-  const start = await call(env, "/api/p/auth/start", { method: "POST" });
-  assert.equal(start.status, 200);
-  const nonce = cookieVal(start, "__Host-qvk_l");
-  const { link, code } = await start.json();
-  const token = link.split("start=")[1];
-  assert.match(token, /^login_[a-f0-9]{32}$/);
-  const from = { id: Number(userId), first_name: first, username: "u" + userId };
-  await webhook(env, { message: { message_id: 1, chat: { id: Number(userId), type: "private" }, from, text: "/start " + token, date: 1 } });
-  const prompt = sent.filter((s) => s.method === "sendMessage" && String(s.body.chat_id) === String(userId)).pop();
-  assert.ok(prompt.body.text.includes(code), "bot shows the same code as the site");
-  const cb = prompt.body.reply_markup.inline_keyboard[0][0].callback_data;
-  assert.match(cb, /^pl:ok:\d+$/);
-  // Pending until confirmed.
-  assert.equal((await (await call(env, "/api/p/auth/poll", { cookie: nonce })).json()).status, "pending");
-  await webhook(env, { callback_query: { id: "cq" + userId, from, data: cb, message: { message_id: 5, chat: { id: Number(userId), type: "private" } } } });
-  const poll = await call(env, "/api/p/auth/poll", { cookie: nonce });
-  assert.equal((await poll.clone().json()).status, "ok");
-  const cookie = cookieVal(poll, "__Host-qvk_s");
+/** Registers "nick" with a password and links Telegram id `tgId` through the bot. Returns {cookie, csrf, me}. */
+async function login(env, tgId, nick = "user" + tgId, { link = true } = {}) {
+  const reg = await call(env, "/api/p/auth/register", { method: "POST", body: { nick, password: "secret-pass-" + tgId } });
+  assert.equal(reg.status, 200, "register " + nick);
+  const cookie = cookieVal(reg, "__Host-qvk_s");
   assert.ok(cookie, "session cookie issued");
-  // The confirmation is single-use.
-  assert.notEqual((await (await call(env, "/api/p/auth/poll", { cookie: nonce })).json()).status, "ok");
-  const me = (await jsonOf(await call(env, "/api/p/me", { cookie }))).data;
+  let me = (await jsonOf(await call(env, "/api/p/me", { cookie }))).data;
+  if (link) {
+    await linkTelegram(env, cookie, me.csrf, tgId);
+    me = (await jsonOf(await call(env, "/api/p/me", { cookie }))).data;
+    assert.equal(me.user.tg_linked, true);
+  }
   return { cookie, csrf: me.csrf, me };
+}
+async function linkTelegram(env, cookie, csrf, tgId, presserId = tgId) {
+  const r = await jsonOf(await call(env, "/api/p/tg/link", { method: "POST", cookie, csrf, body: {} }));
+  assert.equal(r.status, 200);
+  const token = r.data.link.split("start=")[1];
+  assert.match(token, /^link_[a-f0-9]{32}$/);
+  const from = { id: Number(tgId), first_name: "TG" + tgId, username: "tg" + tgId };
+  await webhook(env, { message: { message_id: 1, chat: { id: Number(tgId), type: "private" }, from, text: "/start " + token, date: 1 } });
+  const prompt = sent.filter((x) => x.method === "sendMessage" && String(x.body.chat_id) === String(tgId)).pop();
+  const cb = prompt.body.reply_markup.inline_keyboard[0][0].callback_data;
+  assert.match(cb, /^pl:ok:[a-f0-9]{40}$/);
+  await webhook(env, { callback_query: { id: "cq" + tgId, from: { ...from, id: Number(presserId) }, data: cb, message: { message_id: 5, chat: { id: Number(tgId), type: "private" } } } });
 }
 const as = (env, s) => ({
   get: (p) => call(env, p, { cookie: s.cookie }).then(jsonOf),
@@ -303,38 +302,70 @@ test("portal: full tester + admin workflow", async () => {
   assert.equal((await A.get("/api/p/tickets/BUG-0002")).data.author.name, "Удалённый тестировщик");
 });
 
-test("portal: login confirmation is bound to the Telegram user and browser", async () => {
+test("portal: nickname + password accounts", async () => {
   const env = makeEnv();
-  const start = await call(env, "/api/p/auth/start", { method: "POST" });
-  const nonce = cookieVal(start, "__Host-qvk_l");
-  const token = (await start.json()).link.split("start=")[1];
-  await webhook(env, { message: { message_id: 1, chat: { id: 201, type: "private" }, from: { id: 201, first_name: "A" }, text: "/start " + token, date: 1 } });
-  const cb = sent.filter((s) => s.body.chat_id === 201).pop().body.reply_markup.inline_keyboard[0][0].callback_data;
-  // Another Telegram account presses the button.
-  await webhook(env, { callback_query: { id: "x", from: { id: 202, first_name: "B" }, data: cb } });
-  assert.equal((await (await call(env, "/api/p/auth/poll", { cookie: nonce })).json()).status, "pending");
-  // Without the nonce cookie the token cannot be redeemed.
-  await webhook(env, { callback_query: { id: "y", from: { id: 201, first_name: "A" }, data: cb } });
-  assert.equal((await (await call(env, "/api/p/auth/poll", {})).json()).status, "missing");
+  const reg = (body) => call(env, "/api/p/auth/register", { method: "POST", body }).then(jsonOf);
+  const login = (body) => call(env, "/api/p/auth/login", { method: "POST", body });
+  assert.equal((await reg({ nick: "Tester_1", password: "password-1" })).status, 200);
+  assert.equal((await reg({ nick: "tester_1", password: "password-2" })).status, 409, "nick is unique case-insensitively");
+  assert.equal((await reg({ nick: "a", password: "password-1" })).status, 400, "short nick");
+  assert.equal((await reg({ nick: "<script>", password: "password-1" })).status, 400, "bad characters");
+  assert.equal((await reg({ nick: "shortpw", password: "123" })).status, 400, "short password");
+  assert.equal((await login({ nick: "tester_1", password: "wrong-password" })).status, 401);
+  assert.equal((await login({ nick: "nobody", password: "password-1" })).status, 401);
+  const ok = await login({ nick: "TESTER_1", password: "password-1" });
+  assert.equal(ok.status, 200);
+  const cookie = cookieVal(ok, "__Host-qvk_s");
+  const me = (await jsonOf(await call(env, "/api/p/me", { cookie }))).data;
+  assert.equal(me.user.name, "Tester_1");
+  assert.equal(me.is_admin, false);
+  // Stored hash is PBKDF2, never the plain password.
+  const row = await env.DB.prepare("SELECT pass_hash FROM portal_users WHERE nick_lc='tester_1'").first();
+  assert.match(row.pass_hash, /^pbkdf2\$100000\$/);
+  assert.ok(!row.pass_hash.includes("password-1"));
+  // Registering the admin's nickname does NOT give admin rights.
+  const fake = await reg({ nick: "admin", password: "password-9" });
+  const fc = cookieVal(await login({ nick: "admin", password: "password-9" }), "__Host-qvk_s");
+  assert.equal(fake.status, 200);
+  assert.equal((await jsonOf(await call(env, "/api/p/me", { cookie: fc }))).data.is_admin, false);
+  // Password change signs out other sessions.
+  const other = cookieVal(await login({ nick: "tester_1", password: "password-1" }), "__Host-qvk_s");
+  const r = await call(env, "/api/p/me/password", { method: "POST", cookie, csrf: me.csrf, body: { current: "password-1", password: "password-new" } });
+  assert.equal(r.status, 200);
+  assert.equal((await call(env, "/api/p/me", { cookie: other })).status, 401);
+  assert.equal((await call(env, "/api/p/me", { cookie })).status, 200);
+  assert.equal((await login({ nick: "tester_1", password: "password-new" })).status, 200);
+  // Brute force is rate limited per nickname.
+  let last;
+  for (let i = 0; i < 12; i++) last = await login({ nick: "tester_1", password: "bad" + i });
+  assert.equal(last.status, 429);
   // Requests without the custom header are refused.
-  assert.equal((await call(env, "/api/p/auth/start", { method: "POST", headers: { "x-qvk": "" } })).status, 403);
-  // Webhook without secret is refused (existing behaviour).
-  assert.equal((await call(env, "/webhook", { method: "POST", body: {} })).status, 401);
+  assert.equal((await call(env, "/api/p/auth/login", { method: "POST", body: {}, headers: { "x-qvk": "" } })).status, 403);
+  assert.equal((await call(env, "/webhook", { method: "POST", body: {} })).status, 401, "existing webhook protection intact");
 });
 
-test("portal: Telegram Login Widget signature verification", async () => {
+test("portal: Telegram linking is confirmed by the same Telegram user; admin via ADMIN_IDS", async () => {
   const env = makeEnv();
-  await call(env, "/");
-  await env.DB.prepare("UPDATE portal_settings SET value='on' WHERE key='login_widget'").run();
-  const data = { id: "301", first_name: "W", auth_date: String(Math.floor(Date.now() / 1000)) };
-  const check = Object.keys(data).sort().map((k) => k + "=" + data[k]).join("\n");
-  const secret = createHash("sha256").update(BOT_TOKEN).digest();
-  const hash = createHmac("sha256", secret).update(check).digest("hex");
-  const ok = await call(env, "/auth/telegram?" + new URLSearchParams({ ...data, hash }));
-  assert.equal(ok.status, 302);
-  assert.ok(cookieVal(ok, "__Host-qvk_s"));
-  const bad = await call(env, "/auth/telegram?" + new URLSearchParams({ ...data, first_name: "Evil", hash }));
-  assert.equal(cookieVal(bad, "__Host-qvk_s"), null);
+  const s = await login(env, 501, "linkme", { link: false });
+  // Someone else pressing the button cannot link.
+  await linkTelegram(env, s.cookie, s.csrf, 501, 502);
+  assert.equal((await jsonOf(await call(env, "/api/p/me", { cookie: s.cookie }))).data.user.tg_linked, false);
+  const adm = await login(env, ADMIN, "boss", { link: false });
+  assert.equal(adm.me.is_admin, false, "no admin before Telegram link");
+  assert.equal((await call(env, "/api/p/admin/stats", { cookie: adm.cookie })).status, 403);
+  await linkTelegram(env, adm.cookie, adm.csrf, ADMIN);
+  const me = (await jsonOf(await call(env, "/api/p/me", { cookie: adm.cookie }))).data;
+  assert.equal(me.is_admin, true);
+  assert.equal((await call(env, "/api/p/admin/stats", { cookie: adm.cookie })).status, 200);
+  // Admin resets a forgotten password.
+  const users = (await jsonOf(await call(env, "/api/p/admin/users", { cookie: adm.cookie }))).data.items;
+  const target = users.find((u) => u.name === "linkme");
+  assert.equal((await call(env, "/api/p/admin/users/" + target.id, { method: "POST", cookie: adm.cookie, csrf: me.csrf, body: { password: "temporary-1" } })).status, 200);
+  assert.equal((await call(env, "/api/p/me", { cookie: s.cookie })).status, 401, "old sessions revoked");
+  assert.equal((await call(env, "/api/p/auth/login", { method: "POST", body: { nick: "linkme", password: "temporary-1" } })).status, 200);
+  // Unlinking Telegram removes admin rights.
+  await call(env, "/api/p/tg/unlink", { method: "POST", cookie: adm.cookie, csrf: me.csrf, body: {} });
+  assert.equal((await jsonOf(await call(env, "/api/p/me", { cookie: adm.cookie }))).data.is_admin, false);
 });
 
 test("portal: rate limiting of report creation", async () => {

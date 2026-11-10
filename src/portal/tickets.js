@@ -3,7 +3,7 @@ import {
   BUG_STATUS_IDS, IDEA_STATUS_IDS, CATEGORY_IDS, FREQUENCY_IDS, PRIORITY_IDS, PRIORITIES, LIMITS,
   KNOWN_ISSUE_STATUSES, OPEN_BUG_STATUSES, statusLabel,
 } from "./constants.js";
-import { now, fail, clean, oneOf, likeEscape, getSetting, bump, rateLimit, displayName, admins, isAdminId } from "./util.js";
+import { now, fail, clean, oneOf, likeEscape, getSetting, bump, rateLimit, displayName } from "./util.js";
 import { notify, notifyAdmins } from "./notify.js";
 import { linkAttachments } from "./files.js";
 
@@ -16,10 +16,10 @@ const resolvedStatuses = ["fixed", "closed", "done"];
 export const searchText = (o) => [o.code, o.title, o.description, o.steps, o.expected, o.actual, o.how_it_works, o.purpose].filter(Boolean).join("\n").toLowerCase().replace(/ё/g, "е").slice(0, 20000);
 const normQuery = (q) => String(q).toLowerCase().replace(/ё/g, "е");
 
-const AUTHOR_COLS = "u.first_name AS a_first,u.last_name AS a_last,u.username AS a_username,u.deleted AS a_deleted";
+const AUTHOR_COLS = "u.nick AS a_nick,u.first_name AS a_first,u.last_name AS a_last,u.username AS a_username,u.deleted AS a_deleted";
 
 export function shapeTicket(r, ses) {
-  const author = { id: r.author_id, first_name: r.a_first, last_name: r.a_last, username: r.a_username, deleted: r.a_deleted };
+  const author = { id: r.author_id, nick: r.a_nick, first_name: r.a_first, last_name: r.a_last, username: r.a_username, deleted: r.a_deleted };
   const out = {
     id: r.id, code: r.code, kind: r.kind, category: r.category, title: r.title,
     description: r.description, steps: r.steps, expected: r.expected, actual: r.actual, frequency: r.frequency,
@@ -29,7 +29,7 @@ export function shapeTicket(r, ses) {
     pinned: !!r.pinned, hidden: !!r.hidden, duplicate_of: r.dup_code || null,
     votes: r.votes, confirms: r.confirms, comments: r.comments,
     created: r.created, updated: r.updated, activity: r.activity, resolved: r.resolved,
-    author: { name: displayName(author), is_admin: isAdminId(ses.e, r.author_id), me: r.author_id === ses.user.id },
+    author: { name: displayName(author), is_admin: !!ses.admins?.has(r.author_id), me: r.author_id === ses.user.id },
     my_vote: !!r.my_vote, my_confirm: !!r.my_confirm, my_fav: !!r.my_fav,
   };
   if (ses.isAdmin) {
@@ -40,8 +40,8 @@ export function shapeTicket(r, ses) {
   return out;
 }
 
-function adminInList(e) {
-  const list = [...admins(e)];
+function adminInList(ses) {
+  const list = [...(ses.admins || [])];
   return { sql: list.length ? "(" + list.map(() => "?").join(",") + ")" : "('')", binds: list };
 }
 
@@ -117,7 +117,7 @@ export async function listTickets(e, ses, q) {
   }
   if (q.get("pinned") === "1") where.push("t.pinned=1");
   if (ses.isAdmin && q.get("hidden") === "1") where.push("t.hidden=1");
-  if (ses.isAdmin && /^\d{1,20}$/.test(q.get("author") || "")) {
+  if (ses.isAdmin && /^u[a-z0-9]{15}$/.test(q.get("author") || "")) {
     where.push("t.author_id=?");
     binds.push(q.get("author"));
   }
@@ -139,7 +139,7 @@ export async function listTickets(e, ses, q) {
   const order = (scope === "all" && q.get("pinfirst") !== "0" ? "t.pinned DESC, " : "") + sorts[sortKey];
   const limit = Math.min(100, Math.max(1, Number(q.get("limit")) || 30));
   const page = Math.max(0, Number(q.get("page")) || 0);
-  const adm = adminInList(e);
+  const adm = adminInList(ses);
   const withAdminNote = scope === "mine";
   const sql = `SELECT t.*,${AUTHOR_COLS},d.code AS dup_code,
       EXISTS(SELECT 1 FROM portal_votes v WHERE v.ticket_id=t.id AND v.user_id=?) AS my_vote,
@@ -162,12 +162,12 @@ export async function ticketDetail(e, ses, code) {
   const sesx = { ...ses, e };
   const t = shapeTicket(r, sesx);
   const comments = (await e.DB.prepare(
-    `SELECT c.id,c.user_id,c.kind,c.body,c.created,c.edited,c.deleted,u.first_name,u.last_name,u.username,u.deleted AS udel
+    `SELECT c.id,c.user_id,c.kind,c.body,c.created,c.edited,c.deleted,u.nick,u.first_name,u.last_name,u.username,u.deleted AS udel
      FROM portal_comments c LEFT JOIN portal_users u ON u.id=c.user_id WHERE c.ticket_id=? ORDER BY c.id LIMIT 500`,
   ).bind(r.id).all()).results || [];
   const atts = (await e.DB.prepare("SELECT id,comment_id,name,mime,size,user_id FROM portal_attachments WHERE ticket_id=? ORDER BY created").bind(r.id).all()).results || [];
   const history = (await e.DB.prepare(
-    `SELECT h.field,h.old,h.new,h.note,h.created,h.actor_id,u.first_name,u.last_name,u.username,u.deleted AS udel
+    `SELECT h.field,h.old,h.new,h.note,h.created,h.actor_id,u.nick,u.first_name,u.last_name,u.username,u.deleted AS udel
      FROM portal_history h LEFT JOIN portal_users u ON u.id=h.actor_id WHERE h.ticket_id=? ORDER BY h.id LIMIT 300`,
   ).bind(r.id).all()).results || [];
   const dups = (await e.DB.prepare("SELECT code,title,status FROM portal_tickets WHERE duplicate_of=? ORDER BY id").bind(r.id).all()).results || [];
@@ -180,14 +180,14 @@ export async function ticketDetail(e, ses, code) {
     deleted: !!c.deleted,
     created: c.created,
     edited: c.edited,
-    author: { name: displayName({ id: c.user_id, first_name: c.first_name, last_name: c.last_name, username: c.username, deleted: c.udel }), is_admin: isAdminId(e, c.user_id), me: c.user_id === ses.user.id, is_author: c.user_id === r.author_id },
+    author: { name: displayName({ id: c.user_id, nick: c.nick, first_name: c.first_name, last_name: c.last_name, username: c.username, deleted: c.udel }), is_admin: !!ses.admins?.has(c.user_id), me: c.user_id === ses.user.id, is_author: c.user_id === r.author_id },
     can_delete: !c.deleted && (ses.isAdmin || c.user_id === ses.user.id),
     attachments: c.deleted ? [] : atts.filter((a) => a.comment_id === c.id).map(shapeAtt),
   }));
   t.history = history.map((h) => ({
     field: h.field, old: h.old, new: h.new, note: h.note, created: h.created,
-    actor: displayName({ id: h.actor_id, first_name: h.first_name, last_name: h.last_name, username: h.username, deleted: h.udel }),
-    actor_is_admin: isAdminId(e, h.actor_id),
+    actor: displayName({ id: h.actor_id, nick: h.nick, first_name: h.first_name, last_name: h.last_name, username: h.username, deleted: h.udel }),
+    actor_is_admin: !!ses.admins?.has(h.actor_id),
   }));
   t.duplicates = dups;
   const commentsPublic = (await getSetting(e, "comments_public", "on")) === "on";
@@ -630,7 +630,7 @@ export async function fixHistory(e, ses) {
 
 export async function leaders(e, ses) {
   const users = (await e.DB.prepare(
-    `SELECT u.id,u.first_name,u.last_name,u.username,
+    `SELECT u.id,u.nick,u.first_name,u.last_name,u.username,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='bug') bugs,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='bug' AND t.status IN ('confirmed','in_progress','verify','fixed','closed')) accepted,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='bug' AND t.status IN ('fixed','closed')) fixed,
@@ -641,7 +641,7 @@ export async function leaders(e, ses) {
       (SELECT COUNT(*) FROM portal_comments c WHERE c.user_id=u.id AND c.deleted=0) comments
      FROM portal_users u WHERE u.deleted=0 AND u.banned=0`,
   ).all()).results || [];
-  const adm = admins(e);
+  const adm = ses.admins || new Set();
   const ranked = users
     .filter((u) => !adm.has(u.id))
     .map((u) => ({

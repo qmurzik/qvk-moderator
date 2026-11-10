@@ -1,5 +1,5 @@
 // Local preview of the portal with an in-memory SQLite D1 and a fake Telegram API.
-// node scripts/dev-server.mjs  → http://localhost:8787  (/__dev/login?uid=900 logs in as admin)
+// node scripts/dev-server.mjs  → http://localhost:8787  (/__dev/login?uid=900&name=Команда_QVK logs in as admin)
 import http from "node:http";
 import { readFileSync } from "node:fs";
 import { createD1 } from "../test/helpers/d1.js";
@@ -26,19 +26,25 @@ const call = async (path, opt = {}) => {
   return res;
 };
 async function devLogin(uid, name) {
-  const s = await call("/api/p/auth/start", { method: "POST" });
-  const nonce = s.headers.getSetCookie().find((c) => c.startsWith("__Host-qvk_l")).split(";")[0];
-  const token = (await s.json()).link.split("start=")[1];
-  const from = { id: Number(uid), first_name: name, username: "user" + uid };
-  const hook = (u) => call("/webhook", { method: "POST", body: JSON.stringify({ update_id: ++upd, ...u }), headers: { "X-Telegram-Bot-Api-Secret-Token": "dev", "content-type": "application/json" } });
-  await hook({ message: { message_id: 1, chat: { id: Number(uid), type: "private" }, from, text: "/start " + token, date: 1 } });
-  const cb = tgLog.filter((x) => x.body.chat_id === Number(uid)).pop().body.reply_markup.inline_keyboard[0][0].callback_data;
-  await hook({ callback_query: { id: "c", from, data: cb } });
-  const p = await call("/api/p/auth/poll", { headers: { cookie: nonce } });
-  return p.headers.getSetCookie().find((c) => c.startsWith("__Host-qvk_s")).split(";")[0];
+  const nick = String(name).replace(/[^\p{L}\p{N}_.-]/gu, "_").slice(0, 24);
+  const creds = JSON.stringify({ nick, password: "devpass-" + uid });
+  let r = await call("/api/p/auth/login", { method: "POST", body: creds, headers: { "content-type": "application/json" } });
+  if (r.status !== 200) r = await call("/api/p/auth/register", { method: "POST", body: creds, headers: { "content-type": "application/json" } });
+  const cookie = r.headers.getSetCookie().find((c) => c.startsWith("__Host-qvk_s")).split(";")[0];
+  const me = await (await call("/api/p/me", { headers: { cookie } })).json();
+  if (!me.user.tg_linked) {
+    const link = await (await call("/api/p/tg/link", { method: "POST", body: "{}", headers: { cookie, "x-csrf": me.csrf, "content-type": "application/json" } })).json();
+    const token = link.link.split("start=")[1];
+    const from = { id: Number(uid), first_name: name, username: "tg" + uid };
+    const hook = (u) => call("/webhook", { method: "POST", body: JSON.stringify({ update_id: ++upd, ...u }), headers: { "X-Telegram-Bot-Api-Secret-Token": "dev", "content-type": "application/json" } });
+    await hook({ message: { message_id: 1, chat: { id: Number(uid), type: "private" }, from, text: "/start " + token, date: 1 } });
+    const cb = tgLog.filter((x) => x.body.chat_id === Number(uid)).pop().body.reply_markup.inline_keyboard[0][0].callback_data;
+    await hook({ callback_query: { id: "c", from, data: cb } });
+  }
+  return cookie;
 }
 async function seed() {
-  const users = { 101: "Алиса", 102: "Максим", 103: "Ольга", 900: "Команда QVK" };
+  const users = { 101: "Алиса", 102: "Максим", 103: "Ольга", 900: "Команда_QVK" };
   const sess = {};
   for (const [id, n] of Object.entries(users)) {
     const cookie = await devLogin(id, n);

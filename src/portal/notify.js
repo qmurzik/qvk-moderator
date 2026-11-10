@@ -2,6 +2,7 @@
 import { tg, escapeTgHtml } from "./telegram.js";
 import { now, getSetting, admins } from "./util.js";
 
+
 /**
  * Creates an in-app notification and (if the user enabled it) a Telegram DM.
  * Never notifies the actor about their own action.
@@ -16,13 +17,13 @@ export async function notify(e, ctx, { userId, actorId, ticket, type, text }) {
 }
 
 async function sendDm(e, userId, ticket, text) {
-  const u = await e.DB.prepare("SELECT notify_tg,tg_blocked,deleted FROM portal_users WHERE id=?").bind(String(userId)).first();
-  if (!u || !u.notify_tg || u.tg_blocked || u.deleted) return;
+  const u = await e.DB.prepare("SELECT notify_tg,tg_blocked,deleted,tg_id FROM portal_users WHERE id=?").bind(String(userId)).first();
+  if (!u || !u.tg_id || !u.notify_tg || u.tg_blocked || u.deleted) return;
   const origin = await getSetting(e, "portal_origin", "");
   const link = ticket && origin ? origin + "/" + (ticket.kind === "bug" ? "bugs" : "ideas") + "/" + ticket.code : origin;
   try {
     await tg(e, "sendMessage", {
-      chat_id: String(userId),
+      chat_id: String(u.tg_id),
       parse_mode: "HTML",
       text: "💜 <b>QVK Beta Portal</b>\n" + escapeTgHtml(text),
       link_preview_options: { is_disabled: true },
@@ -40,8 +41,9 @@ export async function notifyAdmins(e, ctx, actorId, ticket, text) {
   if ((await getSetting(e, "notify_admins", "on")) !== "on") return;
   const origin = await getSetting(e, "portal_origin", "");
   const jobs = [];
+  const actor = actorId ? await e.DB.prepare("SELECT tg_id FROM portal_users WHERE id=?").bind(String(actorId)).first() : null;
   for (const id of admins(e)) {
-    if (id === String(actorId)) continue;
+    if (actor?.tg_id && id === String(actor.tg_id)) continue;
     jobs.push(
       tg(e, "sendMessage", {
         chat_id: id,

@@ -375,70 +375,53 @@
   document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && pulse());
 
   // ---------------------------------------------------------------- login
-  async function renderLogin() {
+  async function renderLogin(mode = "login") {
     clearInterval(S.timer);
     const pub = await GET("/public").catch(() => ({ version: "3.0" }));
-    const app = $("#app");
-    set(app, html`
+    const reg = mode === "register";
+    set($("#app"), html`
       <div class="login"><div class="login-card fade-in">
         <div class="logo">${LOGO}</div>
         <span class="ver"><i></i>Бета ${pub.version}</span>
         <h1>QVK Beta Portal</h1>
         <p class="muted">Закрытое тестирование QVK. Сообщайте об ошибках, предлагайте идеи и следите за их статусом.</p>
-        <div class="feat">
+        <div class="seg mt2" style="width:100%;display:grid;grid-template-columns:1fr 1fr"><button data-mode="login" class="${reg ? "" : "on"}" style="justify-content:center">Вход</button><button data-mode="register" class="${reg ? "on" : ""}" style="justify-content:center">Регистрация</button></div>
+        <form id="auth" class="stack mt2" style="text-align:left" novalidate>
+          <label class="f">Ник<input name="nick" maxlength="24" autocomplete="username" autocapitalize="off" spellcheck="false" placeholder="например, qvk_tester" required></label>
+          <label class="f">Пароль${reg ? html` <small>не короче 8 символов</small>` : ""}<input name="password" type="password" maxlength="128" autocomplete="${reg ? "new-password" : "current-password"}" required></label>
+          ${reg ? html`<label class="f">Повторите пароль<input name="password2" type="password" maxlength="128" autocomplete="new-password" required></label>` : ""}
+          <div class="field-err" id="aerr" hidden></div>
+          <button class="btn primary lg block" id="asub">${reg ? raw(icon("sparkles") + "Создать аккаунт") : raw(icon("right") + "Войти")}</button>
+        </form>
+        <p class="faint" style="font-size:13px;margin-top:14px">${reg ? "Ник виден другим тестировщикам. Пароль хранится только в зашифрованном виде." : "Забыли пароль? Напишите администрации в чате тестирования — вам выдадут временный."}</p>
+        ${reg ? "" : html`<div class="feat">
           <div>${I("bug")}<span>Баг-репорты в пару нажатий — с устройством и вложениями</span></div>
-          <div>${I("bell")}<span>Уведомления о статусе прямо в Telegram</span></div>
+          <div>${I("bell")}<span>Статусы обращений и ответы команды в одном месте</span></div>
           <div>${I("bulb")}<span>Голосование за предложения других тестировщиков</span></div>
-        </div>
-        <div id="login-box"><button class="btn primary lg block" id="tg-login">${I("telegram")}Войти через Telegram</button>
-        <p class="faint" style="font-size:13px;margin-top:12px">Вход подтверждается в официальном боте QVK. Пароль не нужен.</p></div>
-        ${pub.login_widget && pub.bot ? html`<div class="hr"></div><p class="faint" style="font-size:13px">или через виджет Telegram</p><div class="tgw" id="tgw"></div>` : ""}
+        </div>`}
       </div></div>`);
-    if (new URLSearchParams(location.search).get("error")) toast("Не удалось войти через виджет. Попробуйте вход через бота.", "err");
-    if (pub.login_widget && pub.bot) {
-      const s = document.createElement("script");
-      s.async = true;
-      s.src = "https://telegram.org/js/telegram-widget.js?22";
-      s.dataset.telegramLogin = pub.bot;
-      s.dataset.size = "large";
-      s.dataset.radius = "14";
-      s.dataset.authUrl = location.origin + "/auth/telegram";
-      s.dataset.requestAccess = "write";
-      $("#tgw").append(s);
-    }
-    $("#tg-login").onclick = startBotLogin;
-  }
-  async function startBotLogin() {
-    const box = $("#login-box");
-    const btn = $("#tg-login");
-    btn.disabled = true;
-    set(btn, html`<span class="spin"></span>Подготовка…`);
-    let r;
-    try { r = await POST("/auth/start"); } catch (err) { fail(err); btn.disabled = false; set(btn, html`${I("telegram")}Войти через Telegram`); return; }
-    set(box, html`
-      <p class="muted" style="margin:0">Код подтверждения</p>
-      <div class="codebox">${r.code}</div>
-      <a class="btn primary lg block" href="${r.link}" target="_blank" rel="noopener" id="open-tg">${I("telegram")}Открыть @${r.bot}</a>
-      <p class="muted" style="font-size:14px;margin:14px 0 0">В Telegram нажмите <b>«Запустить»</b>, затем <b>«Подтвердить вход»</b> и сверьте код.</p>
-      <div class="row" style="justify-content:center;margin-top:16px;color:var(--muted);font-size:14px" id="wait"><span class="spin" style="width:15px;height:15px"></span>Ожидаем подтверждение…</div>
-      <button class="btn ghost sm mt" id="restart">Начать заново</button>`);
-    $("#restart").onclick = () => renderLogin();
-    // Try to open Telegram straight away (works on most mobile browsers).
-    try { window.open(r.link, "_blank", "noopener"); } catch { /* ignore */ }
-    const deadline = r.expires * 1000;
-    const poll = async () => {
-      if (!$("#wait")) return;
-      if (Date.now() > deadline) { set($("#wait"), html`${I("clock", "s")}Время истекло — начните заново`); return; }
+    $$("[data-mode]").forEach((b) => (b.onclick = () => renderLogin(b.dataset.mode)));
+    const form = $("#auth");
+    setTimeout(() => form.nick.focus(), 50);
+    form.onsubmit = async (e) => {
+      e.preventDefault();
+      const err = $("#aerr");
+      const show = (m) => { err.textContent = m; err.hidden = false; };
+      err.hidden = true;
+      const nick = form.nick.value.trim(), password = form.password.value;
+      if (!/^[\p{L}\p{N}_.-]{3,24}$/u.test(nick)) return show("Ник: 3–24 символа — буквы, цифры, «_», «.» или «-»");
+      if (reg && password.length < 8) return show("Пароль должен быть не короче 8 символов");
+      if (reg && password !== form.password2.value) return show("Пароли не совпадают");
+      const btn = $("#asub");
+      btn.disabled = true;
       try {
-        const s = await api("GET", "/auth/poll");
-        if (s.status === "ok") { set($("#wait"), html`${I("check", "s")}Вход подтверждён`); location.replace(location.pathname === "/login" ? "/" : location.pathname + location.search); return; }
-        if (s.status === "denied") { set($("#wait"), html`${I("x", "s")}Вход отменён в Telegram`); return; }
-        if (s.status === "expired" || s.status === "missing") { set($("#wait"), html`${I("clock", "s")}Запрос устарел — начните заново`); return; }
-      } catch { /* retry */ }
-      setTimeout(poll, document.visibilityState === "visible" ? 2000 : 4000);
+        await POST(reg ? "/auth/register" : "/auth/login", { nick, password });
+        boot();
+      } catch (ex) {
+        show(ex.message);
+        btn.disabled = false;
+      }
     };
-    document.addEventListener("visibilitychange", () => document.visibilityState === "visible" && $("#wait") && poll(), { once: true });
-    setTimeout(poll, 1500);
   }
 
   // ---------------------------------------------------------------- boot
@@ -1157,7 +1140,7 @@
       const r = await GET("/notifications");
       const ic = { status: "refresh", comment: "message", need_info: "alert", verify: "refresh", fixed: "check", implemented: "sparkles" };
       set(view, html`<div class="page-head"><div class="grow"><h1>Уведомления</h1><p>Изменения статусов и ответы команды</p></div>${r.items.some((n) => !n.read) ? html`<button class="btn" id="ra">${I("check")}Прочитать все</button>` : ""}</div>
-        ${!S.me.user.notify_tg || S.me.user.tg_blocked ? html`<a class="callout row" style="--c:var(--accent);color:var(--text)" href="https://t.me/${S.me.bot}?start=portal_notify" target="_blank" rel="noopener">${I("telegram")}<span>Получайте уведомления в Telegram — нажмите, чтобы включить их в боте @${S.me.bot}.</span></a>` : ""}
+        ${!S.me.user.tg_linked || !S.me.user.notify_tg || S.me.user.tg_blocked ? html`<a class="callout row" style="--c:var(--accent);color:var(--text)" href="/profile">${I("telegram")}<span>Хотите получать уведомления в Telegram? Подключите его в профиле — это займёт 10 секунд.</span>${I("right", "right")}</a>` : ""}
         <div class="stack stagger">${r.items.length ? r.items.map((n) => html`<button class="notif ${n.read ? "" : "unread"}" data-n="${n.id}" data-href="${n.code ? "/" + (n.kind === "bug" ? "bugs" : "ideas") + "/" + n.code : ""}"><span class="ni">${I(ic[n.type] || "bell")}</span><span style="flex:1;min-width:0"><span class="tx">${n.text}</span><small class="faint" style="display:block;margin-top:4px">${rel(n.created)}${n.code ? " · " + n.code : ""}</small></span>${n.read ? "" : raw('<span class="dot"></span>')}</button>`) : empty("bell", "Уведомлений нет", "Здесь появятся изменения статусов ваших обращений и ответы команды.")}</div>`);
       $("#ra", view) && ($("#ra", view).onclick = async () => { await POST("/notifications/read", {}); updateUnread(0); load(); });
       $$("[data-n]", view).forEach((b) => (b.onclick = async () => {
@@ -1180,7 +1163,11 @@
           <span class="row" style="gap:4px">${d.id !== u.active_device ? html`<button class="btn sm" data-act="${d.id}">Основное</button>` : ""}<button class="btn sm icon" data-edd="${d.id}" aria-label="Изменить">${I("edit", "s")}</button><button class="btn sm icon" data-deld="${d.id}" aria-label="Удалить">${I("trash", "s")}</button></span></div>`) : empty("phone", "Нет устройств", "Добавьте устройство, чтобы отправлять баг-репорты.")}</div>
         <h2 class="sec">${I("settings", "s")}Настройки</h2>
         <div class="card">
-          <label class="switch"><input type="checkbox" id="ntg" ${u.notify_tg ? "checked" : ""}><span class="t">Уведомления в Telegram<small>${u.tg_blocked ? raw(`Бот не может написать вам. <a href="https://t.me/${esc(me.bot)}?start=portal_notify" target="_blank" rel="noopener">Откройте бота</a> и нажмите «Запустить».`) : "Бот пришлёт сообщение, когда статус ваших обращений изменится"}</small></span></label>
+          <div class="row wrap" style="padding:10px 0;gap:12px"><span class="di" style="width:40px;height:40px;border-radius:12px;background:var(--surface2);display:grid;place-items:center;color:var(--accent)">${I("telegram")}</span><span style="flex:1;min-width:180px"><b>Telegram</b><small class="muted" style="display:block;font-size:13px">${u.tg_linked ? (u.tg_blocked ? "Привязан, но бот не может вам написать — откройте бота и нажмите «Запустить»." : "Привязан" + (u.username ? " · @" + u.username : "") + ". Уведомления приходят в личные сообщения бота.") : "Не привязан. Подключите, чтобы получать уведомления в Telegram."}</small></span>
+            ${u.tg_linked ? html`<button class="btn sm" id="tgun">Отвязать</button>` : html`<button class="btn primary sm" id="tglink">${I("telegram", "s")}Подключить</button>`}</div>
+          ${u.tg_linked ? html`<label class="switch"><input type="checkbox" id="ntg" ${u.notify_tg ? "checked" : ""}><span class="t">Уведомления в Telegram<small>Бот пришлёт сообщение, когда статус ваших обращений изменится</small></span></label>` : ""}
+          <div class="hr" style="margin:6px 0"></div>
+          <div class="row between wrap" style="padding:8px 0"><span><b>Пароль</b><small class="muted" style="display:block;font-size:13px">Вход: ник <b>${u.nick || u.name}</b> и пароль</small></span><button class="btn sm" id="pwd">${I("key", "s")}Сменить пароль</button></div>
           <div class="hr" style="margin:6px 0"></div>
           <div class="row between wrap" style="padding:8px 0"><span><b>Тема оформления</b></span><div class="seg" id="theme"><button data-th="dark">${I("moon", "s")}Тёмная</button><button data-th="light">${I("sun", "s")}Светлая</button><button data-th="system">Авто</button></div></div>
         </div>
@@ -1191,7 +1178,26 @@
       $$("[data-edd]", view).forEach((b) => (b.onclick = () => devSheet(me.devices.find((d) => String(d.id) === b.dataset.edd))));
       $$("[data-deld]", view).forEach((b) => (b.onclick = async () => { if (!(await confirmSheet("Удалить устройство?", "Ранее отправленные отчёты сохранят данные устройства.", "Удалить", true))) return; try { await api("DELETE", "/devices/" + b.dataset.deld); await reloadMe(); toast("Устройство удалено"); draw(); } catch (err) { fail(err); } }));
       $$("[data-act]", view).forEach((b) => (b.onclick = async () => { try { await api("PATCH", "/me", { active_device: Number(b.dataset.act) }); await reloadMe(); toast("Основное устройство изменено"); draw(); } catch (err) { fail(err); } }));
-      $("#ntg", view).onchange = async (e) => { try { await api("PATCH", "/me", { notify_tg: e.target.checked }); await reloadMe(); toast(e.target.checked ? "Уведомления включены" : "Уведомления выключены"); draw(); } catch (err) { fail(err); } };
+      if ($("#tglink", view)) $("#tglink", view).onclick = async () => {
+        try {
+          const r = await POST("/tg/link");
+          sheet("Подключение Telegram", (b, close) => {
+            set(b, html`<p class="muted" style="margin-top:0">Откройте бота <b>@${r.bot}</b>, нажмите <b>«Запустить»</b>, затем <b>«Привязать»</b>. Ссылка действует 15 минут.</p><a class="btn primary lg block" href="${r.link}" target="_blank" rel="noopener">${I("telegram")}Открыть @${r.bot}</a><button class="btn block mt" id="tgdone">Готово, я подтвердил</button>`);
+            $("#tgdone", b).onclick = async () => { await reloadMe(); close(); toast(S.me.user.tg_linked ? "Telegram привязан" : "Привязка ещё не подтверждена", S.me.user.tg_linked ? "ok" : "err"); renderShell(); markNav(); run(); };
+          });
+        } catch (err) { fail(err); }
+      };
+      if ($("#tgun", view)) $("#tgun", view).onclick = async () => { if (!(await confirmSheet("Отвязать Telegram?", "Уведомления в Telegram перестанут приходить." + (me.is_admin ? " Вы потеряете доступ к админ-панели." : ""), "Отвязать", true))) return; try { await POST("/tg/unlink"); await reloadMe(); toast("Telegram отвязан"); renderShell(); markNav(); run(); } catch (err) { fail(err); } };
+      $("#pwd", view).onclick = () => sheet("Смена пароля", (b, close) => {
+        set(b, html`<form class="stack" id="pf"><label class="f">Текущий пароль<input type="password" name="current" autocomplete="current-password"></label><label class="f">Новый пароль <small>не короче 8 символов</small><input type="password" name="password" autocomplete="new-password"></label><label class="f">Повторите новый пароль<input type="password" name="password2" autocomplete="new-password"></label><button class="btn primary block">${I("check")}Сохранить</button><p class="faint" style="font-size:13px;margin:0">После смены пароля другие устройства выйдут из аккаунта.</p></form>`);
+        $("#pf", b).onsubmit = async (e) => {
+          e.preventDefault();
+          const f = e.target;
+          if (f.password.value !== f.password2.value) return toast("Пароли не совпадают", "err");
+          try { await POST("/me/password", { current: f.current.value, password: f.password.value }); close(); toast("Пароль изменён"); } catch (err) { fail(err); }
+        };
+      });
+      if ($("#ntg", view)) $("#ntg", view).onchange = async (e) => { try { await api("PATCH", "/me", { notify_tg: e.target.checked }); await reloadMe(); toast(e.target.checked ? "Уведомления включены" : "Уведомления выключены"); draw(); } catch (err) { fail(err); } };
       $("#logout", view).onclick = async () => { await POST("/auth/logout").catch(() => {}); location.href = "/"; };
       $("#delp", view).onclick = async () => { if (!(await confirmSheet("Удалить профиль?", "Устройства, черновики, избранное и уведомления будут удалены безвозвратно. Отчёты останутся без имени автора.", "Удалить профиль", true))) return; try { await api("DELETE", "/me"); location.href = "/"; } catch (err) { fail(err); } };
     };
@@ -1365,10 +1371,15 @@
       const r = await GET("/admin/users");
       set(view, html`${head("Тестировщики", `${r.items.length} ${plural(r.items.length, ["участник", "участника", "участников"])}`)}
         <div class="stack">${r.items.map((u) => html`<div class="card row wrap" style="gap:14px">${avatar(u.name, u.is_admin)}<div style="flex:1;min-width:200px"><b>${u.name}</b>${u.is_admin ? html` <span class="role">Админ</span>` : ""}${u.banned ? html` <span class="role" style="color:var(--bad)">Заблокирован</span>` : ""}
-          <div class="muted" style="font-size:13px">${u.username ? html`<a href="https://t.me/${u.username}" target="_blank" rel="noopener">@${u.username}</a> · ` : ""}<span class="mono">${u.id}</span> · был ${rel(u.last_seen)}</div>
+          <div class="muted" style="font-size:13px">${u.username ? html`<a href="https://t.me/${u.username}" target="_blank" rel="noopener">@${u.username}</a> · ` : ""}${u.tg_linked ? "Telegram привязан · " : ""}был ${rel(u.last_seen)}</div>
           ${u.device ? html`<div class="faint" style="font-size:13px">${I("phone", "s")} ${u.device}</div>` : ""}</div>
           <div class="row wrap" style="gap:6px"><a class="chip" href="/admin/bugs?author=${u.id}">${I("bug", "s")}${u.bugs}</a><a class="chip" href="/admin/ideas?author=${u.id}">${I("bulb", "s")}${u.ideas}</a><span class="chip">${I("message", "s")}${u.comments}</span>
-          ${u.is_admin ? "" : html`<button class="btn sm ${u.banned ? "" : "danger"}" data-ban="${u.id}" data-to="${u.banned ? "0" : "1"}">${u.banned ? "Разблокировать" : "Заблокировать"}</button>`}</div></div>`)}</div>`);
+          <button class="btn sm" data-pw="${u.id}" data-nick="${u.name}">${I("key", "s")}Пароль</button>${u.is_admin ? "" : html`<button class="btn sm ${u.banned ? "" : "danger"}" data-ban="${u.id}" data-to="${u.banned ? "0" : "1"}">${u.banned ? "Разблокировать" : "Заблокировать"}</button>`}</div></div>`)}</div>`);
+      $$("[data-pw]", view).forEach((b) => (b.onclick = () => sheet("Временный пароль · " + b.dataset.nick, (box, close) => {
+        const gen = Array.from(crypto.getRandomValues(new Uint8Array(10)), (x) => "abcdefghjkmnpqrstuvwxyz23456789"[x % 31]).join("");
+        set(box, html`<form class="stack" id="rpf"><p class="muted" style="margin:0">Тестировщик выйдет на всех устройствах. Передайте ему новый пароль — он сможет сменить его в профиле.</p><label class="f">Новый пароль<input name="password" class="mono" value="${gen}"></label><button class="btn primary block">${I("check")}Установить</button></form>`);
+        $("#rpf", box).onsubmit = async (e) => { e.preventDefault(); try { await POST("/admin/users/" + b.dataset.pw, { password: e.target.password.value }); close(); toast("Пароль установлен"); } catch (err) { fail(err); } };
+      })));
       $$("[data-ban]", view).forEach((b) => (b.onclick = async () => {
         const ban = b.dataset.to === "1";
         if (ban && !(await confirmSheet("Заблокировать тестировщика?", "Пользователь потеряет доступ к порталу. Его обращения сохранятся.", "Заблокировать", true))) return;
@@ -1392,12 +1403,11 @@
         <div class="card pad-l"><h2 class="sec" style="margin-top:0">${I("settings", "s")}Параметры</h2>
           <label class="switch"><input type="checkbox" data-set="comments_public" ${s.comments_public ? "checked" : ""}><span class="t">Комментарии от всех тестировщиков<small>Если выключено — обсуждать обращение могут только автор и команда</small></span></label>
           <label class="switch"><input type="checkbox" data-set="notify_admins" ${s.notify_admins ? "checked" : ""}><span class="t">Уведомлять администраторов в Telegram<small>О новых обращениях, ответах авторов и результатах перепроверки</small></span></label>
-          <label class="switch"><input type="checkbox" data-set="login_widget" ${s.login_widget ? "checked" : ""}><span class="t">Вход через виджет Telegram<small>Дополнительный способ входа. Требует команды /setdomain в @BotFather для домена ${location.host}</small></span></label>
           <div class="hr"></div>
           <h2 class="sec" style="margin-top:0">${I("download", "s")}Выгрузка данных</h2>
           <div class="row wrap"><a class="btn sm" href="/api/p/admin/export?format=csv" download>Всё · CSV</a><a class="btn sm" href="/api/p/admin/export?format=json" download>Всё · JSON</a><a class="btn sm" href="/api/p/admin/export?kind=bug&format=csv" download>Баги · CSV</a><a class="btn sm" href="/api/p/admin/export?kind=idea&format=csv" download>Идеи · CSV</a></div>
           <div class="hr"></div>
-          <p class="faint" style="font-size:13px;margin:0">Ссылка для тестировщиков: <a href="/" class="mono">${location.origin}/</a><br>Администраторы определяются переменной ADMIN_IDS на сервере.</p>
+          <p class="faint" style="font-size:13px;margin:0">Ссылка для тестировщиков: <a href="/" class="mono">${location.origin}/</a><br>Администратор — аккаунт, к которому в профиле привязан Telegram из переменной ADMIN_IDS на сервере. Ник сам по себе прав не даёт.</p>
         </div>
       </div>`);
     const saveSet = async (patch, msg) => { try { await POST("/admin/settings", patch); await reloadMe(); toast(msg || "Настройки сохранены"); } catch (err) { fail(err); } };

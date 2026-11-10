@@ -146,6 +146,7 @@ export function csvCell(v) {
 export const displayName = (u) => {
   if (!u) return "Тестировщик";
   if (u.deleted) return "Удалённый тестировщик";
+  if (u.nick) return u.nick;
   const n = [u.first_name, u.last_name].filter(Boolean).join(" ").trim();
   return n || (u.username ? "@" + u.username : "Тестировщик " + String(u.id).slice(-4));
 };
