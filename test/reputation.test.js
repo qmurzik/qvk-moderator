@@ -1,0 +1,6 @@
+import test from "node:test";import assert from "node:assert/strict";import {modeAllowed,setupRep,addRep,getRep,topRep} from "../src/reputation.js";
+test("users can upvote peers; tester points are owner-only",()=>{assert.equal(modeAllowed("users","111","222"),true);assert.equal(modeAllowed("testers","111","222"),false);assert.equal(modeAllowed("testers","111","111"),true)});
+test("only owner can configure mode, and one group per mode",async()=>{let stored=null;const e={REPUTATION_OWNER_ID:"5110155633",DB:{prepare(sql){return {bind(...args){return {async first(){return stored},async run(){stored={value:args[1]};return {meta:{changes:1}}}}}}}}};await assert.rejects(setupRep(e,"-10012345","testers","123456"),/владелец/);assert.equal(await setupRep(e,"-10012345","testers","5110155633"),"testers")});
+test("self votes fail before any database writes",async()=>{const e={REPUTATION_OWNER_ID:"5110155633"};await assert.rejects(addRep(e,{chat:"-1001",actor:123456,target:123456,sourceMessage:1}),/самому себе/)});
+
+test("positive and negative reputation have the same owner access rules",()=>{assert.equal(modeAllowed("users","5110155633","234567890"),true);assert.equal(modeAllowed("testers","5110155633","234567890"),false);assert.equal(modeAllowed("testers","5110155633","5110155633"),true)});

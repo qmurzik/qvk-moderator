@@ -1,9 +1,7 @@
 import test from "node:test";import assert from "node:assert/strict";import {assess,GUIDES} from "../src/rules.js";
-test("bug belongs to bugs",()=>assert.equal(assess("bugs","На test38 вылетает видео").verdict,"ok"));
-test("feature request not bugs",()=>assert.equal(assess("bugs","Предлагаю добавить вкладку").verdict,"offtopic"));
-test("bug not idea",()=>assert.equal(assess("ideas","Вылетает при запуске").verdict,"offtopic"));
-test("feature idea",()=>assert.equal(assess("ideas","Добавьте настройку иконок").verdict,"ok"));
-test("VK link belongs to badges",()=>assert.equal(assess("badges","https://vk.com/id123456").verdict,"ok"));
-test("chat unrestricted",()=>assert.equal(assess("chat","Привет всем!").verdict,"ok"));
-test("media uncertain",()=>assert.equal(assess("bugs","",true).verdict,"uncertain"));
-test("guidance for all topics",()=>assert.equal(Object.keys(GUIDES).length,5));
+const safe=(kind,text)=>assert.notEqual(assess(kind,text).verdict,"offtopic",text);
+test("context and questions are safe",()=>{safe("bugs","Почему не работает авторизация?");safe("ideas","Можно добавить тему?");safe("bugs","Да, у меня тоже");safe("ideas","У меня вылетает");});
+test("mixed discussion is safe",()=>{safe("ideas","Предлагаю улучшить авторизацию: сейчас QVK вылетает при входе.");safe("bugs","Ошибка авторизации в QVK, предлагаю приложить видео.");});
+test("badge and release topics protected",()=>{safe("badges","Как получить значок тестировщика?");safe("badges","У меня вылетает приложение, на test38");safe("releases","Спасибо за новую сборку");});
+test("very clear category mixups can be detected",()=>{assert.equal(assess("bugs","Предлагаю добавить возможность менять цвет интерфейса приложения для всех пользователей QVK.").verdict,"offtopic");assert.equal(assess("ideas","На test38 приложение QVK постоянно вылетает при открытии видео, ошибка повторяется каждый раз.").verdict,"offtopic");});
+test("valid messages remain supported",()=>{assert.equal(assess("bugs","На test38 приложение QVK вылетает при открытии видео.").verdict,"ok");assert.equal(assess("ideas","Предлагаю добавить новую настройку цвета интерфейса QVK.").verdict,"ok");assert.equal(assess("chat","Привет всем").verdict,"ok");assert.equal(assess("bugs","",true).verdict,"uncertain");assert.equal(Object.keys(GUIDES).length,5);});

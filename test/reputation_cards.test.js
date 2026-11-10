@@ -1,0 +1,5 @@
+import test from "node:test";import assert from "node:assert/strict";import {repCard,repTopCard,repLevel,cardButtons,escapeHtml} from "../src/reputation_cards.js";
+test("cards show real Telegram names, optional username and ranks",()=>{const s=repCard("testers",{id:"123456",name:"Аня Иванова",username:"anya_qvk"},55,1);assert.match(s,/Аня Иванова/);assert.match(s,/@anya_qvk/);assert.match(s,/Элита/);assert.match(s,/Место в рейтинге/);assert.doesNotMatch(s,/<b>123456<\/b>/)});
+test("HTML special characters are escaped",()=>{const s=repCard("users",{id:"234567",name:"<User & me>",username:"foo"},1);assert.match(s,/&lt;User &amp; me&gt;/);assert.doesNotMatch(s,/<User & me>/)});
+test("top shows names instead of raw IDs",()=>{const s=repTopCard("users",[{user_id:"234567",name:"Маша",username:"masha",score:7}]);assert.match(s,/Маша/);assert.match(s,/@masha/);assert.doesNotMatch(s,/<code>234567<\/code>/)});
+test("inline vote callbacks fit Telegram limit",()=>{const v=cardButtons("12345678901234567890").inline_keyboard.flat().map(x=>x.callback_data);assert.ok(v.every(x=>x.length<=64));assert.ok(v.includes("rv:1:12345678901234567890"))});

@@ -1,0 +1,24 @@
+name: Validate QVK Moderator
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node --check src/index.js
+      - run: node --check src/rules.js
+      - run: node --check src/guards.js
+      - run: node --check src/dm.js
+      - run: node --check src/people.js
+      - run: node --check src/advanced.js
+      - run: node --check src/miniapp.js
+      - run: node scripts/build-portal.mjs
+      - run: git diff --exit-code src/portal/assets.gen.js migrations/
+      - run: for f in src/portal/*.js; do node --check "$f"; done
+      - run: npm test

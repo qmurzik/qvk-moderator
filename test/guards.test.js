@@ -1,0 +1,10 @@
+import test from "node:test";import assert from "node:assert/strict";import {linkRisk,normalized,fastHash,evaluateFlood} from "../src/guards.js";
+test("link shorteners flagged",()=>assert.equal(linkRisk("https://bit.ly/abc").risky,true));
+test("regular link allowed",()=>assert.equal(linkRisk("https://github.com/qvk/project").risky,false));
+test("many links flagged",()=>assert.equal(linkRisk(["https://a.com","https://b.com","https://c.com","https://d.com"].join(" ")).risky,true));
+test("text_link entities handled",()=>assert.equal(linkRisk("",[{type:"text_link",url:"https://tinyurl.com/x"}]).risky,true));
+test("normalize repeat",()=>assert.equal(normalized("ПРИВЕТ!!!"),normalized("привет")));
+test("hash stable",()=>assert.equal(fastHash("hi"),fastHash("hi")));
+test("flood threshold",()=>assert.equal(evaluateFlood(7,0)!=="",true));
+test("duplicate threshold",()=>assert.equal(evaluateFlood(2,3)!=="",true));
+test("few messages permitted",()=>assert.equal(evaluateFlood(4,1),""));

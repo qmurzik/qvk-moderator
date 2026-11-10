@@ -1,14 +1,22 @@
 {
   "name": "qvk-moderator",
-  "version": "1.2.0",
+  "version": "3.5.0",
   "type": "module",
   "private": true,
   "scripts": {
+    "build:portal": "node scripts/build-portal.mjs",
+    "pretest": "node scripts/build-portal.mjs",
     "test": "node --test",
+    "predeploy": "node scripts/build-portal.mjs",
     "deploy": "wrangler deploy",
-    "db:init": "wrangler d1 execute qvk-moderator-db --remote --file=./schema.sql"
+    "db:init": "wrangler d1 execute qvk-moderator-db --remote --file=./schema.sql",
+    "db:migrate": "wrangler d1 migrations apply qvk-moderator-db --remote",
+    "portal:dev": "node scripts/dev-server.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "@cloudflare/puppeteer": "^1.0.0"
   }
 }

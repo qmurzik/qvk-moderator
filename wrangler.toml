@@ -12,3 +12,22 @@ binding = "AI"
 binding = "DB"
 database_name = "qvk-moderator-db"
 database_id = "bbebd392-3ea6-43e7-8012-33c923be4700"
+migrations_dir = "migrations"
+
+[browser]
+binding = "BROWSER"
+
+[[queues.producers]]
+queue = "qvk-reputation-cleanup"
+binding = "REP_CLEANUP"
+
+[[queues.consumers]]
+queue = "qvk-reputation-cleanup"
+max_batch_size = 10
+
+# QVK Beta Portal attachments: when R2 is enabled in the account, create the bucket
+# (wrangler r2 bucket create qvk-beta-files) and uncomment the binding below.
+# Without it, attachments are stored privately in D1 (chunked) — no extra setup.
+# [[r2_buckets]]
+# binding = "FILES"
+# bucket_name = "qvk-beta-files"
