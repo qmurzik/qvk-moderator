@@ -3,6 +3,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createD1 } from "./helpers/d1.js";
+import { deflateRawSync, crc32 } from "node:zlib";
 import worker from "../src/index.js";
 import { resetSchemaCache } from "../src/portal/schema.js";
 import { sniff } from "../src/portal/files.js";
@@ -97,6 +98,22 @@ async function uploadPng(env, s, name = "shot.png", bytes = PNG, type = "image/p
   fd.append("file", new Blob([bytes], { type }), name);
   const req = new Request(ORIGIN + "/api/p/upload", { method: "POST", body: fd, headers: { origin: ORIGIN, cookie: s.cookie, "x-csrf": s.csrf } });
   return jsonOf(await worker.fetch(req, env, { waitUntil() {} }));
+}
+
+/** Builds a ZIP with deflated entries. */
+function makeZip(files) {
+  const locals = [], centrals = [];
+  let offset = 0;
+  for (const [name, text] of Object.entries(files)) {
+    const raw = Buffer.from(text), comp = deflateRawSync(raw), nm = Buffer.from(name), crc = crc32(raw);
+    const lh = Buffer.alloc(30); lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(8, 8); lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(comp.length, 18); lh.writeUInt32LE(raw.length, 22); lh.writeUInt16LE(nm.length, 26);
+    const ch = Buffer.alloc(46); ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(8, 10); ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(comp.length, 20); ch.writeUInt32LE(raw.length, 24); ch.writeUInt16LE(nm.length, 28); ch.writeUInt32LE(offset, 42);
+    locals.push(lh, nm, comp); centrals.push(ch, nm);
+    offset += 30 + nm.length + comp.length;
+  }
+  const cd = Buffer.concat(centrals), eocd = Buffer.alloc(22);
+  eocd.writeUInt32LE(0x06054b50, 0); eocd.writeUInt16LE(Object.keys(files).length, 8); eocd.writeUInt16LE(Object.keys(files).length, 10); eocd.writeUInt32LE(cd.length, 12); eocd.writeUInt32LE(offset, 16);
+  return new Uint8Array(Buffer.concat([...locals, cd, eocd]));
 }
 
 const BUG = { kind: "bug", category: "music", title: "Плеер останавливается при блокировке экрана", description: "Музыка перестаёт играть через несколько секунд после блокировки.", steps: "1. Включить трек\n2. Заблокировать экран", expected: "Музыка играет", actual: "Остановка", frequency: "always" };
@@ -375,7 +392,11 @@ test("portal: MCP connector gives Claude admin access as «Команда QVK»"
   const X = as(env, admin), A = as(env, tester);
   await A.send("POST", "/api/p/devices", { model: "Pixel 9", android: "15", app_version: "3.0" });
   const dev = (await A.get("/api/p/me")).data.devices[0].id;
-  await A.send("POST", "/api/p/tickets", { ...BUG, device_id: dev });
+  const img = (await uploadPng(env, tester)).data.attachment;
+  const log = (await uploadPng(env, tester, "app.log", new TextEncoder().encode("start\n" + "x".repeat(70000) + "\nFATAL crash in Player\n"), "text/plain")).data.attachment;
+  const zip = (await uploadPng(env, tester, "logs.zip", makeZip({ "logcat.txt": "E/Player: boom\n".repeat(50), "bin.dat": "\u0000\u0001\u0002" }), "application/zip")).data.attachment;
+  assert.ok(img && log && zip, "uploads ok");
+  await A.send("POST", "/api/p/tickets", { ...BUG, device_id: dev, attachments: [img.id, log.id, zip.id] });
   await A.send("POST", "/api/p/tickets", { ...BUG, title: "Музыка выключается после блокировки", device_id: dev });
 
   const rpc = async (path, body, headers = {}) => {
@@ -408,6 +429,22 @@ test("portal: MCP connector gives Claude admin access as «Команда QVK»"
   assert.equal(list.data.total, 2);
   const t = await call2("get_ticket", { code: "BUG-0001" });
   assert.equal(t.data.device.model, "Pixel 9");
+  assert.equal(t.data.attachments.length, 3);
+  // Attachments are viewable through the connector.
+  const raw = (args) => rpc("/mcp/" + key, { jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "get_attachment", arguments: args } }).then((r) => r.data.result);
+  const ri = await raw({ id: img.id });
+  assert.equal(ri.content[1].type, "image");
+  assert.equal(ri.content[1].mimeType, "image/png");
+  assert.deepEqual([...Buffer.from(ri.content[1].data, "base64")], [...PNG]);
+  const rl = await raw({ id: log.id });
+  assert.match(rl.content[0].text, /offset=60000/);
+  const tail = await raw({ id: log.id, offset: -100 });
+  assert.match(tail.content[0].text, /FATAL crash in Player/);
+  const rz = JSON.parse((await raw({ id: zip.id })).content[0].text);
+  assert.deepEqual(rz.files.map((f) => f.name), ["logcat.txt", "bin.dat"]);
+  assert.match((await raw({ id: zip.id, entry: "logcat.txt" })).content[0].text, /E\/Player: boom/);
+  assert.match((await raw({ id: zip.id, entry: "bin.dat" })).content[0].text, /двоичный/);
+  assert.equal((await raw({ id: "a".repeat(20) })).isError, true);
   sent.length = 0;
   const up = await call2("update_ticket", { code: "BUG-0001", status: "confirmed", priority: "high", note: "Воспроизвели" });
   assert.equal(up.data.ticket.status, "confirmed");

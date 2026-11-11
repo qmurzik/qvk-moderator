@@ -174,3 +174,75 @@ export async function serveFile(req, e, ses, id, canSeeTicket) {
   }
   return new Response(out, { status: range ? 206 : 200, headers });
 }
+
+/** Reads a whole attachment into memory (admin tools only; size is bounded by upload limits). */
+export async function readAttachment(e, att) {
+  if (att.storage === "r2") {
+    if (!e.FILES) fail(503, "Хранилище файлов недоступно");
+    const obj = await e.FILES.get("att/" + att.id);
+    if (!obj) fail(404, "Файл не найден");
+    return new Uint8Array(await obj.arrayBuffer());
+  }
+  const rows = (await e.DB.prepare("SELECT idx,data FROM portal_chunks WHERE att_id=? ORDER BY idx").bind(att.id).all()).results || [];
+  const out = new Uint8Array(att.size);
+  let pos = 0;
+  for (const r of rows) {
+    const d = r.data instanceof Uint8Array ? r.data : new Uint8Array(r.data);
+    out.set(d.subarray(0, Math.min(d.length, out.length - pos)), pos);
+    pos += d.length;
+  }
+  return out;
+}
+
+/** Lists entries of a ZIP archive (central directory). */
+export function zipEntries(b) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  let eocd = -1;
+  for (let i = b.length - 22; i >= Math.max(0, b.length - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) fail(422, "Повреждённый ZIP-архив");
+  const count = dv.getUint16(eocd + 10, true);
+  let p = dv.getUint32(eocd + 16, true);
+  const out = [];
+  for (let n = 0; n < count && p + 46 <= b.length && dv.getUint32(p, true) === 0x02014b50; n++) {
+    const nameLen = dv.getUint16(p + 28, true), extraLen = dv.getUint16(p + 30, true), commentLen = dv.getUint16(p + 32, true);
+    out.push({
+      name: new TextDecoder().decode(b.subarray(p + 46, p + 46 + nameLen)),
+      method: dv.getUint16(p + 10, true),
+      compressed: dv.getUint32(p + 20, true),
+      size: dv.getUint32(p + 24, true),
+      offset: dv.getUint32(p + 42, true),
+    });
+    p += 46 + nameLen + extraLen + commentLen;
+  }
+  return out;
+}
+
+/** Extracts one ZIP entry (stored or deflate), returning at most `limit` bytes. */
+export async function zipExtract(b, entry, limit = 2 * 1024 * 1024) {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const p = entry.offset;
+  if (dv.getUint32(p, true) !== 0x04034b50) fail(422, "Повреждённый ZIP-архив");
+  const start = p + 30 + dv.getUint16(p + 26, true) + dv.getUint16(p + 28, true);
+  const data = b.subarray(start, start + entry.compressed);
+  if (entry.method === 0) return data.subarray(0, limit);
+  if (entry.method !== 8) fail(422, "Неподдерживаемое сжатие в архиве");
+  const reader = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw")).getReader();
+  const parts = [];
+  let total = 0;
+  while (total < limit) {
+    const { done, value } = await reader.read().catch(() => fail(422, "Не удалось распаковать файл из архива"));
+    if (done) break;
+    parts.push(value);
+    total += value.length;
+  }
+  reader.cancel().catch(() => {});
+  const out = new Uint8Array(Math.min(total, limit));
+  let o = 0;
+  for (const part of parts) {
+    const n = Math.min(part.length, out.length - o);
+    out.set(part.subarray(0, n), o);
+    o += n;
+    if (o >= out.length) break;
+  }
+  return out;
+}
