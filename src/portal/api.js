@@ -5,6 +5,7 @@ import { loadSession, register, login, logout, changePassword, adminResetPasswor
 import { botUsername } from "./telegram.js";
 import { upload } from "./files.js";
 import * as T from "./tickets.js";
+import { mcpStatus, createMcpKey, revokeMcpKey } from "./mcp.js";
 
 // ---------- profile & devices ----------
 
@@ -78,7 +79,7 @@ async function deleteProfile(req, e, ses) {
 
 // ---------- admin ----------
 
-async function adminStats(e) {
+export async function adminStats(e) {
   const by = (await e.DB.prepare("SELECT kind,status,COUNT(*) n FROM portal_tickets GROUP BY kind,status").all()).results || [];
   const count = (kind, statuses) => by.filter((r) => r.kind === kind && (!statuses || statuses.includes(r.status))).reduce((s, r) => s + r.n, 0);
   const prio = (await e.DB.prepare("SELECT priority,COUNT(*) n FROM portal_tickets WHERE kind='bug' AND status IN ('new','confirmed','in_progress','verify','need_info') GROUP BY priority").all()).results || [];
@@ -102,9 +103,9 @@ async function adminStats(e) {
     `SELECT u.id,u.nick,u.first_name,u.last_name,u.username,u.last_seen,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.created>=?) tickets,
       (SELECT COUNT(*) FROM portal_comments c WHERE c.user_id=u.id AND c.created>=? AND c.deleted=0) comments
-     FROM portal_users u WHERE u.deleted=0 ORDER BY tickets DESC, comments DESC, u.last_seen DESC LIMIT 10`,
+     FROM portal_users u WHERE u.deleted=0 AND u.id<>'claude' ORDER BY tickets DESC, comments DESC, u.last_seen DESC LIMIT 10`,
   ).bind(t - 30 * day, t - 30 * day).all()).results || [];
-  const users = await e.DB.prepare("SELECT COUNT(*) total, SUM(last_seen>=?) active7, SUM(created>=?) new7 FROM portal_users WHERE deleted=0").bind(t - 7 * day, t - 7 * day).first();
+  const users = await e.DB.prepare("SELECT COUNT(*) total, SUM(last_seen>=?) active7, SUM(created>=?) new7 FROM portal_users WHERE deleted=0 AND id<>'claude'").bind(t - 7 * day, t - 7 * day).first();
   return {
     bugs: {
       total: count("bug"), new: count("bug", ["new"]), in_work: count("bug", ["confirmed", "in_progress"]), verify: count("bug", ["verify"]),
@@ -119,20 +120,20 @@ async function adminStats(e) {
   };
 }
 
-async function adminUsers(e, ses) {
+export async function adminUsers(e, ses) {
   const rows = (await e.DB.prepare(
     `SELECT u.id,u.nick,u.first_name,u.last_name,u.username,u.created,u.last_seen,u.banned,u.notify_tg,u.tg_blocked,u.tg_id,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='bug') bugs,
       (SELECT COUNT(*) FROM portal_tickets t WHERE t.author_id=u.id AND t.kind='idea') ideas,
       (SELECT COUNT(*) FROM portal_comments c WHERE c.user_id=u.id AND c.deleted=0) comments,
       (SELECT model||' · Android '||android||' · '||app_version FROM portal_devices d WHERE d.user_id=u.id ORDER BY d.updated DESC LIMIT 1) device
-     FROM portal_users u WHERE u.deleted=0 ORDER BY u.last_seen DESC LIMIT 500`,
+     FROM portal_users u WHERE u.deleted=0 AND u.id<>'claude' ORDER BY u.last_seen DESC LIMIT 500`,
   ).all()).results || [];
   const adm = ses.admins;
   return { items: rows.map(({ tg_id, ...u }) => ({ ...u, tg_linked: !!tg_id, name: displayName(u), is_admin: adm.has(u.id), banned: !!u.banned })) };
 }
 
-async function adminSettings(e, body) {
+export async function adminSettings(e, body) {
   if (body.current_version !== undefined) {
     const v = clean(body.current_version, 32, { multiline: false });
     if (!v) fail(400, "Укажите версию");
@@ -144,7 +145,7 @@ async function adminSettings(e, body) {
   return { ok: true };
 }
 
-async function savePost(e, ses, id, body) {
+export async function savePost(e, ses, id, body) {
   const kind = oneOf(body.kind, ["announce", "changelog"], "announce");
   const title = clean(body.title, 140, { multiline: false });
   const text = clean(body.body, LIMITS.postBody);
@@ -324,6 +325,12 @@ export async function handleApi(req, e, ctx, url) {
     if (seg[1] === "merge" && method === "POST") return json(await T.adminMerge(e, ctx, ses, await readJson(req)));
     if (seg[1] === "export" && method === "GET") return exportData(e, q);
     if (seg[1] === "settings" && method === "POST") return json(await adminSettings(e, await readJson(req)));
+    if (seg[1] === "mcp" && method === "GET") return json(await mcpStatus(e));
+    if (seg[1] === "mcp" && method === "POST") return json({ ok: true, key: await createMcpKey(e), url: url.origin + "/mcp/" });
+    if (seg[1] === "mcp" && method === "DELETE") {
+      await revokeMcpKey(e);
+      return json({ ok: true });
+    }
     if (seg[1] === "users" && !seg[2] && method === "GET") return json(await adminUsers(e, ses));
     if (seg[1] === "users" && seg[2] && method === "POST") {
       const b = await readJson(req);
@@ -351,4 +358,14 @@ export function apiError(err) {
   if (err instanceof HttpError) return json({ error: err.message, ...(err.extra || {}) }, err.status);
   console.error("Portal API failure", err?.stack || String(err));
   return json({ error: "Внутренняя ошибка сервера. Попробуйте ещё раз." }, 500);
+}
+
+/** Public settings snapshot (used by the MCP connector). */
+export async function settingsSnapshot(e) {
+  return {
+    current_version: await getSetting(e, "current_version", "3.0"),
+    welcome: await getSetting(e, "welcome", ""),
+    comments_public: (await getSetting(e, "comments_public", "on")) === "on",
+    notify_admins: (await getSetting(e, "notify_admins", "on")) === "on",
+  };
 }

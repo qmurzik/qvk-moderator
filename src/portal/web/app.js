@@ -1409,7 +1409,41 @@
           <div class="hr"></div>
           <p class="faint" style="font-size:13px;margin:0">Ссылка для тестировщиков: <a href="/" class="mono">${location.origin}/</a><br>Администратор — аккаунт, к которому в профиле привязан Telegram из переменной ADMIN_IDS на сервере. Ник сам по себе прав не даёт.</p>
         </div>
-      </div>`);
+      </div>
+      <div class="card pad-l mt2" id="mcp-card"><div class="sk line" style="width:40%"></div></div>`);
+    const drawMcp = async () => {
+      const box = $("#mcp-card", view);
+      let st;
+      try { st = await GET("/admin/mcp"); } catch (err) { set(box, html`<p class="field-err">${err.message}</p>`); return; }
+      set(box, html`<h2 class="sec" style="margin-top:0">${I("sparkles", "s")}Управление через Claude<span class="chip" style="margin-left:auto;text-transform:none;letter-spacing:0">${st.enabled ? "🟢 Подключено" : "⚪ Выключено"}</span></h2>
+        <p class="muted" style="margin:0 0 12px;font-size:14px">Подключите портал к Claude как коннектор — и Claude сможет смотреть обращения, менять статусы и приоритеты, отвечать тестировщикам, объединять дубликаты, публиковать объявления и менять версию. Тестировщики видят эти действия от имени <b>«Команда QVK»</b>.</p>
+        ${st.enabled ? html`<p class="faint" style="font-size:13px;margin:0 0 12px">Ключ создан ${fmtDT(st.created)}${st.last_used ? " · последнее использование " + rel(st.last_used) : " · ещё не использовался"}</p>` : ""}
+        <div class="row wrap"><button class="btn ${st.enabled ? "" : "primary"}" id="mcp-new">${I("key")}${st.enabled ? "Создать новый ключ" : "Включить и получить ссылку"}</button>${st.enabled ? html`<button class="btn danger" id="mcp-off">${I("x")}Отключить</button>` : ""}</div>`);
+      $("#mcp-new", box).onclick = async () => {
+        if (st.enabled && !(await confirmSheet("Создать новый ключ?", "Старая ссылка перестанет работать — коннектор в Claude нужно будет переподключить.", "Создать"))) return;
+        try {
+          const r = await POST("/admin/mcp");
+          const link = r.url + r.key;
+          sheet("Ссылка для Claude", (b) => {
+            set(b, html`<p class="muted" style="margin-top:0">Ссылка показывается <b>один раз</b>. Это пароль от админ-доступа — не публикуйте её.</p>
+              <div class="row"><input class="mono" readonly value="${link}" id="mcp-link" style="font-size:13px"><button class="btn icon" id="mcp-copy" aria-label="Скопировать">${I("copy")}</button></div>
+              <div class="block mt2"><h4>Как подключить</h4><div class="text" style="font-size:14px">1. claude.ai → Settings → Connectors → «Add custom connector».
+2. Название: QVK Beta Portal, URL — ссылка выше. Авторизацию не заполняйте.
+3. В чате включите коннектор и попросите, например: «Покажи новые баги и расставь приоритеты».
+
+Для Claude Code: claude mcp add --transport http qvk ${link}</div></div>`);
+            $("#mcp-link", b).onclick = (e) => e.target.select();
+            $("#mcp-copy", b).onclick = async () => { try { await navigator.clipboard.writeText(link); toast("Ссылка скопирована"); } catch { $("#mcp-link", b).select(); } };
+          });
+          drawMcp();
+        } catch (err) { fail(err); }
+      };
+      if ($("#mcp-off", box)) $("#mcp-off", box).onclick = async () => {
+        if (!(await confirmSheet("Отключить доступ Claude?", "Ссылка перестанет работать сразу.", "Отключить", true))) return;
+        try { await api("DELETE", "/admin/mcp"); toast("Доступ отключён"); drawMcp(); } catch (err) { fail(err); }
+      };
+    };
+    drawMcp();
     const saveSet = async (patch, msg) => { try { await POST("/admin/settings", patch); await reloadMe(); toast(msg || "Настройки сохранены"); } catch (err) { fail(err); } };
     $("#vf", view).onsubmit = async (e) => { e.preventDefault(); await saveSet({ current_version: e.target.current_version.value.trim() }, "Версия обновлена"); $$(".side .brand small").forEach((x) => (x.textContent = "Тестирование " + S.me.settings.current_version)); };
     $("#wf", view).onsubmit = (e) => { e.preventDefault(); saveSet({ welcome: e.target.welcome.value }); };

@@ -281,3 +281,9 @@ npm run deploy               # predeploy собирает src/portal/assets.gen.
 Новых секретов не требуется. Необязательно: `BOT_USERNAME` (иначе берётся из `getMe`).
 
 **Разработка:** исходники фронтенда — `src/portal/web/app.js`, `app.css`; после правок `npm run build:portal`. Локальный предпросмотр с тестовыми данными: `npm run portal:dev` → `http://localhost:8787/__dev/login?uid=900&name=Команда_QVK` (админ).
+
+### 🤖 Управление порталом через Claude
+
+`/admin/settings` → «Управление через Claude» → «Включить и получить ссылку». Ссылка вида `https://<сайт>/mcp/qvk_…` — это MCP-сервер (Streamable HTTP). Подключение: claude.ai → Settings → Connectors → «Add custom connector» → вставить ссылку; или `claude mcp add --transport http qvk <ссылка>`. Также принимается `Authorization: Bearer <ключ>` на `/mcp`.
+
+Инструменты: `get_overview`, `list_tickets`, `get_ticket`, `update_ticket`, `bulk_update`, `add_comment`, `merge_duplicate`, `find_similar`, `list_testers`, `list_posts`, `publish_post`, `delete_post`, `update_settings`. Все действия выполняются встроенным админ-аккаунтом, который тестировщики видят как «Команда QVK» (история, комментарии, уведомления). В D1 хранится только SHA-256 ключа; «Создать новый ключ» отзывает старый, «Отключить» — закрывает доступ сразу.

@@ -1,6 +1,7 @@
 // QVK Beta Portal — entry point mounted inside the existing qvk-moderator Worker.
 import { ensureSchema } from "./schema.js";
-import { handleApi, apiError } from "./api.js";
+import { handleApi, apiError, adminStats, adminUsers, adminSettings, savePost, settingsSnapshot } from "./api.js";
+import { handleMcp } from "./mcp.js";
 import { loadSession, adminUserIds } from "./auth.js";
 import { serveFile } from "./files.js";
 import { canSeeTicketId } from "./tickets.js";
@@ -14,7 +15,7 @@ const PAGES = new Set(["/", "/login", "/my", "/all", "/known", "/fixes", "/updat
 
 /** Paths owned by the portal. Existing moderator routes (/app, /bug-form, /api/app, /webhook…) are untouched. */
 export function isPortalPath(p) {
-  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/manifest.webmanifest";
+  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p === "/mcp" || p.startsWith("/mcp/") || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/manifest.webmanifest";
 }
 
 const CSP = [
@@ -86,6 +87,7 @@ export async function portal(req, e, ctx) {
         icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }],
       }), { headers: { "content-type": "application/manifest+json", "cache-control": "public, max-age=3600" } });
     }
+    if (p === "/mcp" || p.startsWith("/mcp/")) return await handleMcp(req, e, ctx, url, { adminStats, adminUsers, adminSettings, savePost, settings: settingsSnapshot });
     if (p.startsWith("/api/p")) return await handleApi(req, e, ctx, url);
     if (p.startsWith("/files/")) {
       if (!["GET", "HEAD"].includes(req.method)) return new Response("Method Not Allowed", { status: 405 });
@@ -97,7 +99,7 @@ export async function portal(req, e, ctx) {
     if (req.method !== "GET" && req.method !== "HEAD") return new Response("Method Not Allowed", { status: 405 });
     return html(shell());
   } catch (err) {
-    if (p.startsWith("/api/p")) return apiError(err);
+    if (p.startsWith("/api/p") || p.startsWith("/mcp")) return apiError(err);
     if (err instanceof HttpError) return new Response(err.message, { status: err.status, headers: { "content-type": "text/plain; charset=utf-8" } });
     console.error("Portal failure", err?.stack || String(err));
     return new Response("Внутренняя ошибка", { status: 500 });

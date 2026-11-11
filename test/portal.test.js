@@ -368,6 +368,77 @@ test("portal: Telegram linking is confirmed by the same Telegram user; admin via
   assert.equal((await jsonOf(await call(env, "/api/p/me", { cookie: adm.cookie }))).data.is_admin, false);
 });
 
+test("portal: MCP connector gives Claude admin access as «Команда QVK»", async () => {
+  const env = makeEnv();
+  const admin = await login(env, ADMIN, "boss");
+  const tester = await login(env, 777, "tester777");
+  const X = as(env, admin), A = as(env, tester);
+  await A.send("POST", "/api/p/devices", { model: "Pixel 9", android: "15", app_version: "3.0" });
+  const dev = (await A.get("/api/p/me")).data.devices[0].id;
+  await A.send("POST", "/api/p/tickets", { ...BUG, device_id: dev });
+  await A.send("POST", "/api/p/tickets", { ...BUG, title: "Музыка выключается после блокировки", device_id: dev });
+
+  const rpc = async (path, body, headers = {}) => {
+    const res = await call(env, path, { method: "POST", body, headers: { origin: "", "x-qvk": "", ...headers } });
+    return { status: res.status, data: res.status === 202 ? null : await res.json() };
+  };
+  // Disabled by default.
+  assert.equal((await rpc("/mcp/qvk_" + "0".repeat(48), { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401);
+  // Only admins manage the key.
+  assert.equal((await A.send("POST", "/api/p/admin/mcp", {})).status, 403);
+  const k = await X.send("POST", "/api/p/admin/mcp", {});
+  assert.equal(k.status, 200);
+  assert.match(k.data.key, /^qvk_[a-f0-9]{48}$/);
+  const key = k.data.key;
+  assert.ok(!(await env.DB.prepare("SELECT value FROM portal_settings WHERE key='mcp_key_hash'").first()).value.includes(key), "only hash stored");
+  assert.equal((await rpc("/mcp/qvk_" + "1".repeat(48), { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401, "wrong key");
+
+  const init = await rpc("/mcp/" + key, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } } });
+  assert.equal(init.data.result.protocolVersion, "2025-06-18");
+  assert.equal((await rpc("/mcp/" + key, { jsonrpc: "2.0", method: "notifications/initialized" })).status, 202);
+  const tools = (await rpc("/mcp/" + key, { jsonrpc: "2.0", id: 2, method: "tools/list" })).data.result.tools.map((t) => t.name);
+  for (const n of ["get_overview", "list_tickets", "get_ticket", "update_ticket", "bulk_update", "add_comment", "merge_duplicate", "list_testers", "publish_post", "update_settings"]) assert.ok(tools.includes(n), n);
+  // Bearer auth works too.
+  const call2 = (name, args, viaBearer = false) =>
+    rpc(viaBearer ? "/mcp" : "/mcp/" + key, { jsonrpc: "2.0", id: 9, method: "tools/call", params: { name, arguments: args } }, viaBearer ? { authorization: "Bearer " + key } : {}).then((r) => {
+      const res = r.data.result;
+      return { isError: !!res.isError, data: res.isError ? res.content[0].text : JSON.parse(res.content[0].text) };
+    });
+  const list = await call2("list_tickets", { kind: "bug", status: "new" }, true);
+  assert.equal(list.data.total, 2);
+  const t = await call2("get_ticket", { code: "BUG-0001" });
+  assert.equal(t.data.device.model, "Pixel 9");
+  sent.length = 0;
+  const up = await call2("update_ticket", { code: "BUG-0001", status: "confirmed", priority: "high", note: "Воспроизвели" });
+  assert.equal(up.data.ticket.status, "confirmed");
+  assert.equal((await call2("update_ticket", { code: "BUG-0001", status: "nonsense" })).isError, true, "validation errors are reported");
+  await call2("add_comment", { code: "BUG-0001", text: "Спасибо, уже исправляем" });
+  // Tester sees the team, not "Claude".
+  const view = (await A.get("/api/p/tickets/BUG-0001")).data;
+  const c = view.comment_list.find((x) => x.body === "Спасибо, уже исправляем");
+  assert.equal(c.author.name, "Команда QVK");
+  assert.equal(c.author.is_admin, true);
+  assert.equal(view.history.find((h) => h.field === "status" && h.new === "confirmed").actor, "Команда QVK");
+  const notes = (await A.get("/api/p/notifications")).data.items;
+  assert.ok(notes.some((n) => n.type === "comment") && notes.some((n) => n.type === "status"));
+  assert.ok(sent.some((m) => m.method === "sendMessage" && m.body.chat_id === "777"), "tester DM via bot");
+  assert.ok(!JSON.stringify(view).includes("Claude"), "no Claude mention for testers");
+  // Merge, posts, settings, overview, testers.
+  assert.equal((await call2("merge_duplicate", { source: "BUG-0002", target: "BUG-0001" })).data.ok, true);
+  await call2("publish_post", { kind: "changelog", title: "Сборка 3.0.3", body: "Исправлен плеер", version: "3.0.3" });
+  await call2("update_settings", { current_version: "3.0.3" });
+  assert.equal((await A.get("/api/p/home")).data.version, "3.0.3");
+  assert.equal((await A.get("/api/p/home")).data.posts[0].title, "Сборка 3.0.3");
+  const ov = await call2("get_overview", {});
+  assert.equal(ov.data.bugs.total, 2);
+  const testers = await call2("list_testers", {});
+  assert.ok(!testers.data.some((u) => u.user_id === "claude"));
+  // Status/revoke.
+  assert.ok((await X.get("/api/p/admin/mcp")).data.last_used);
+  await X.send("DELETE", "/api/p/admin/mcp");
+  assert.equal((await rpc("/mcp/" + key, { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401, "revoked");
+});
+
 test("portal: rate limiting of report creation", async () => {
   const env = makeEnv();
   const s = await login(env, 401);

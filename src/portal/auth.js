@@ -64,9 +64,10 @@ export const isAdminUser = (e, u) => !!u?.tg_id && isAdminId(e, u.tg_id);
 /** Ids of portal accounts that are admins (used for "Команда QVK" badges). */
 export async function adminUserIds(e) {
   const list = String(e.ADMIN_IDS || "").split(",").map((x) => x.trim()).filter(Boolean);
-  if (!list.length) return new Set();
+  // "claude" is the built-in account used by the MCP connector (see mcp.js).
+  if (!list.length) return new Set(["claude"]);
   const rows = (await e.DB.prepare(`SELECT id FROM portal_users WHERE tg_id IN (${list.map(() => "?").join(",")})`).bind(...list).all()).results || [];
-  return new Set(rows.map((r) => r.id));
+  return new Set(["claude", ...rows.map((r) => r.id)]);
 }
 
 export async function createSession(req, e, userId) {
