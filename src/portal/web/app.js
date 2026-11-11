@@ -274,7 +274,7 @@
   async function run() {
     if (!S.me) return boot();
     const p = location.pathname;
-    if (!S.me.devices.length && !S.me.is_admin && !["/welcome", "/profile"].includes(p)) {
+    if (!S.me.devices.length && !S.me.is_admin && !["/welcome", "/profile", "/link"].includes(p)) {
       sessionStorage.setItem("qvk_after_welcome", p + location.search);
       return navigate("/welcome", true);
     }
@@ -913,7 +913,7 @@
 
     const drawHead = () => set($("#t-head", view), html`
       <div class="thead"><span class="mono" style="color:var(--accent);font-weight:800">${t.code}</span>${badge(t.kind, t.status, true)}${isBug && t.priority !== "normal" ? prio(t.priority) : ""}
-        ${t.pinned ? html`<span class="chip">${I("pin", "s")}Закреплено</span>` : ""}${t.hidden ? html`<span class="chip">${I("eyeoff", "s")}Скрыто администрацией</span>` : ""}
+        ${t.pinned ? html`<span class="chip">${I("pin", "s")}Закреплено</span>` : ""}${t.hidden ? html`<span class="chip">${I("eyeoff", "s")}Скрыто администрацией</span>` : ""}${t.source === "app" ? html`<span class="chip">${I("phone", "s")}Из приложения</span>` : ""}
         <span class="right row"><button class="btn sm icon ${t.my_fav ? "on" : ""}" id="fav" aria-label="В избранное" title="В избранное">${I("star", "s")}</button><button class="btn sm icon" id="copy" aria-label="Скопировать ссылку" title="Скопировать ссылку">${I("link", "s")}</button>${t.can.edit ? html`<button class="btn sm" id="edit">${I("edit", "s")}<span class="hide-m">Изменить</span></button>` : ""}</span></div>
       <h1 class="ttitle">${t.title}</h1>
       <div class="row wrap muted" style="font-size:13.5px;gap:14px"><span class="row" style="gap:6px">${I("user", "s")}${t.author.name}${t.author.is_admin ? html` <span class="role">Команда</span>` : ""}${t.author.me ? html` <span class="role">Вы</span>` : ""}</span><span title="${fmtDT(t.created)}">${I("clock", "s")} ${fmtDate(t.created)}</span><span>${I(catOf(t.category).icon, "s")} ${catOf(t.category).label}</span>${t.updated !== t.created ? html`<span>Обновлено ${rel(t.updated)}</span>` : ""}</div>
@@ -1159,6 +1159,31 @@
   });
 
   // ---------------------------------------------------------------- profile
+  // ---------------------------------------------------------------- app linking
+  route(/^\/link$/, async (m, view) => {
+    const initial = (new URLSearchParams(location.search).get("code") || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+    const draw = (code = initial) => {
+      set(view, html`<div class="wiz"><div class="page-head"><div class="grow"><h1>Подключение приложения</h1><p>Введите код, который показывает приложение QVK, чтобы оно могло отправлять обращения от вашего имени.</p></div></div>
+        <form class="card pad-l stack" id="lf"><label class="f">Код из приложения<input name="code" class="mono" maxlength="9" autocomplete="off" autocapitalize="characters" placeholder="ABCD-EFGH" value="${code ? code.slice(0, 4) + (code.length > 4 ? "-" + code.slice(4) : "") : ""}" style="font-size:22px;letter-spacing:3px;text-align:center"></label><button class="btn primary lg block">${I("right")}Продолжить</button></form></div>`);
+      $("#lf", view).onsubmit = async (e) => {
+        e.preventDefault();
+        const c = e.target.code.value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+        if (c.length !== 8) return toast("Код состоит из 8 символов", "err");
+        try {
+          const r = await GET("/app-links/" + c);
+          set(view, html`<div class="wiz"><div class="page-head"><div class="grow"><h1>Подключить приложение?</h1></div></div>
+            <div class="card pad-l stack"><div class="row" style="gap:14px"><span class="di" style="width:48px;height:48px;border-radius:14px;background:var(--surface2);display:grid;place-items:center;color:var(--accent)">${I("phone", "l")}</span><div><b style="font-size:17px">${r.device_name}</b><div class="muted mono">Код ${r.code}</div></div></div>
+            <p class="muted" style="margin:0">Приложение сможет от имени <b>${S.me.user.name}</b> создавать обращения, комментировать, подтверждать «у меня тоже» и видеть ваши обращения. Отключить его можно в профиле в любой момент.</p>
+            <div class="row"><button class="btn block" id="ld">Отмена</button><button class="btn primary block" id="lc">${I("check")}Подключить</button></div></div></div>`);
+          $("#lc", view).onclick = async () => { try { await POST("/app-links/" + c + "/confirm"); toast("Приложение подключено"); set(view, html`<div class="success fade-in"><div class="big">${I("check")}</div><div class="code" style="font-size:26px">Готово</div><p class="muted">Вернитесь в приложение QVK — оно подключится автоматически.</p><a class="btn mt2" href="/profile">Перейти в профиль</a></div>`); } catch (err) { fail(err); } };
+          $("#ld", view).onclick = async () => { try { await POST("/app-links/" + c + "/deny"); toast("Подключение отменено"); navigate("/"); } catch (err) { fail(err); } };
+        } catch (err) { fail(err); }
+      };
+    };
+    draw();
+    if (initial.length === 8) $("#lf", view).requestSubmit();
+  });
+
   // ---------------------------------------------------------------- web push
   const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
   const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -1208,6 +1233,18 @@
     };
   }
 
+  async function drawApps(view) {
+    const box = $("#apps-list", view);
+    if (!box) return;
+    let r;
+    try { r = await GET("/app-tokens"); } catch { return; }
+    set(box, r.items.map((k) => html`<div class="row" style="gap:10px;padding:8px 12px;border-radius:12px;background:var(--surface)"><span style="flex:1;min-width:0"><b class="ell" style="display:block">${k.name}</b><small class="faint">подключено ${fmtDate(k.created)} · активность ${rel(k.last_used)}</small></span><button class="btn sm danger" data-revoke="${k.id}">Отключить</button></div>`));
+    $$("[data-revoke]", box).forEach((b) => (b.onclick = async () => {
+      if (!(await confirmSheet("Отключить приложение?", "Приложение потеряет доступ к аккаунту. Чтобы снова пользоваться им, подключите его по новому коду.", "Отключить", true))) return;
+      try { await api("DELETE", "/app-tokens/" + b.dataset.revoke); toast("Приложение отключено"); drawApps(view); } catch (err) { fail(err); }
+    }));
+  }
+
   route(/^\/profile$/, async (m, view) => {
     const draw = () => {
       const me = S.me, u = me.user;
@@ -1225,6 +1262,8 @@
           <label class="switch"><input type="checkbox" id="nnews" ${u.notify_news !== false ? "checked" : ""}><span class="t">Новости и списки изменений<small>Присылать объявления команды в Telegram и пуш-уведомлениями</small></span></label>
           <div class="hr" style="margin:6px 0"></div>
           <div class="row wrap" style="padding:10px 0;gap:12px" id="push-row"><span class="di" style="width:40px;height:40px;border-radius:12px;background:var(--surface2);display:grid;place-items:center;color:var(--accent)">${I("bell")}</span><span style="flex:1;min-width:180px"><b>Пуш-уведомления в браузере</b><small class="muted" style="display:block;font-size:13px" id="push-st">Проверяем…</small></span><span id="push-btn"></span></div>
+          <div class="hr" style="margin:6px 0"></div>
+          <div style="padding:10px 0" id="apps-row"><div class="row wrap" style="gap:12px"><span class="di" style="width:40px;height:40px;border-radius:12px;background:var(--surface2);display:grid;place-items:center;color:var(--accent)">${I("phone")}</span><span style="flex:1;min-width:180px"><b>Приложение QVK</b><small class="muted" style="display:block;font-size:13px">Отправляйте обращения прямо из приложения. Подключение — по коду, без пароля.</small></span><a class="btn sm" href="/link">${I("key", "s")}Ввести код</a></div><div id="apps-list" class="stack" style="margin-top:10px"></div></div>
           <div class="hr" style="margin:6px 0"></div>
           <div class="row between wrap" style="padding:8px 0"><span><b>Пароль</b><small class="muted" style="display:block;font-size:13px">Вход: ник <b>${u.nick || u.name}</b> и пароль</small></span><button class="btn sm" id="pwd">${I("key", "s")}Сменить пароль</button></div>
           <div class="hr" style="margin:6px 0"></div>
@@ -1258,6 +1297,7 @@
       });
       $("#nnews", view).onchange = async (e) => { try { await api("PATCH", "/me", { notify_news: e.target.checked }); await reloadMe(); toast(e.target.checked ? "Новости включены" : "Новости выключены"); } catch (err) { fail(err); } };
       drawPush(view);
+      drawApps(view);
       if ($("#ntg", view)) $("#ntg", view).onchange = async (e) => { try { await api("PATCH", "/me", { notify_tg: e.target.checked }); await reloadMe(); toast(e.target.checked ? "Уведомления включены" : "Уведомления выключены"); draw(); } catch (err) { fail(err); } };
       $("#logout", view).onclick = async () => { await disablePush().catch(() => {}); await POST("/auth/logout").catch(() => {}); location.href = "/"; };
       $("#delp", view).onclick = async () => { if (!(await confirmSheet("Удалить профиль?", "Устройства, черновики, избранное и уведомления будут удалены безвозвратно. Отчёты останутся без имени автора.", "Удалить профиль", true))) return; try { await api("DELETE", "/me"); location.href = "/"; } catch (err) { fail(err); } };

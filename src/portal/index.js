@@ -9,14 +9,23 @@ import { canSeeTicketId } from "./tickets.js";
 import { json, SECURITY_HEADERS, getSetting, HttpError } from "./util.js";
 import { APP_JS, APP_CSS, ASSET_HASH } from "./assets.gen.js";
 
-export { botStart as portalBotStart, botCallback as portalBotCallback } from "./auth.js";
+import { botStart, botCallback } from "./auth.js";
+import { handleAppApi, APP_PREFIX, appBotStart, appBotCallback } from "./appapi.js";
+
+/** Bot hooks: account linking (/start link_…) and app linking (/start app_…). */
+export async function portalBotStart(e, message) {
+  return (await botStart(e, message)) || (await appBotStart(e, message));
+}
+export async function portalBotCallback(e, cq) {
+  return (await botCallback(e, cq)) || (await appBotCallback(e, cq));
+}
 
 const PAGE_PREFIXES = ["/bugs/", "/ideas/", "/admin/", "/new/"];
-const PAGES = new Set(["/", "/login", "/my", "/all", "/known", "/fixes", "/updates", "/leaders", "/notifications", "/profile", "/admin", "/welcome", "/new"]);
+const PAGES = new Set(["/", "/login", "/my", "/all", "/known", "/fixes", "/updates", "/leaders", "/notifications", "/profile", "/admin", "/welcome", "/new", "/link"]);
 
 /** Paths owned by the portal. Existing moderator routes (/app, /bug-form, /api/app, /webhook…) are untouched. */
 export function isPortalPath(p) {
-  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p === "/mcp" || p.startsWith("/mcp/") || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/sw.js" || p === "/manifest.webmanifest";
+  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p === "/mcp" || p.startsWith("/mcp/") || p.startsWith("/api/app/v1/") || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/sw.js" || p === "/manifest.webmanifest";
 }
 
 const CSP = [
@@ -120,6 +129,7 @@ export async function portal(req, e, ctx) {
         icons: [{ src: "/favicon.svg", sizes: "any", type: "image/svg+xml", purpose: "any maskable" }],
       }), { headers: { "content-type": "application/manifest+json", "cache-control": "public, max-age=3600" } });
     }
+    if (p.startsWith(APP_PREFIX + "/")) return await handleAppApi(req, e, ctx, url);
     if (p === "/mcp" || p.startsWith("/mcp/")) return await handleMcp(req, e, ctx, url, { adminStats, adminUsers, adminSettings, savePost, settings: settingsSnapshot });
     if (p.startsWith("/api/p")) return await handleApi(req, e, ctx, url);
     if (p.startsWith("/files/")) {

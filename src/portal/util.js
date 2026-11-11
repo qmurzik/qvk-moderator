@@ -119,7 +119,10 @@ export async function rateLimit(e, key, limit, windowSec) {
   const row = await e.DB.prepare(
     "INSERT INTO portal_rate(k,w,c) VALUES(?,?,1) ON CONFLICT(k) DO UPDATE SET c=CASE WHEN portal_rate.w=excluded.w THEN portal_rate.c+1 ELSE 1 END, w=excluded.w RETURNING c",
   ).bind(k, w).first();
-  if ((row?.c || 0) > limit) fail(429, "Слишком много запросов. Подождите немного и попробуйте снова.");
+  if ((row?.c || 0) > limit) {
+    const retry = windowSec - (now() % windowSec);
+    fail(429, "Слишком много запросов. Подождите немного и попробуйте снова.", { retry_after: retry });
+  }
 }
 
 export async function getSetting(e, key, fallback = "") {

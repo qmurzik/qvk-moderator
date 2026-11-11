@@ -8,6 +8,7 @@ import * as T from "./tickets.js";
 import { mcpStatus, createMcpKey, revokeMcpKey } from "./mcp.js";
 import { broadcastPost, drainOutbox } from "./broadcast.js";
 import { vapidKeys } from "./push.js";
+import { lookupLink, decideLink, listAppTokens, revokeAppToken } from "./appapi.js";
 
 // Only real Web Push services (prevents using the Worker to POST to arbitrary hosts).
 const PUSH_HOSTS = /^(fcm\.googleapis\.com|android\.googleapis\.com|updates\.push\.services\.mozilla\.com|push\.services\.mozilla\.com|[a-z0-9.-]+\.push\.apple\.com|[a-z0-9.-]+\.notify\.windows\.com|[a-z0-9.-]+\.push\.yandex\.(ru|net))$/i;
@@ -98,6 +99,7 @@ async function deleteProfile(req, e, ses) {
     e.DB.prepare("DELETE FROM portal_favorites WHERE user_id=?").bind(id),
     e.DB.prepare("DELETE FROM portal_notifications WHERE user_id=?").bind(id),
     e.DB.prepare("DELETE FROM portal_sessions WHERE user_id=?").bind(id),
+    e.DB.prepare("UPDATE portal_app_tokens SET revoked=1 WHERE user_id=?").bind(id),
     // Reports stay (they belong to the project) but are de-personalised.
     e.DB.prepare("UPDATE portal_users SET first_name='',last_name=NULL,username=NULL,photo_url=NULL,active_device=NULL,notify_tg=0,nick=NULL,nick_lc=NULL,pass_hash=NULL,tg_id=NULL,deleted=1 WHERE id=?").bind(id),
   ]);
@@ -285,6 +287,17 @@ export async function handleApi(req, e, ctx, url) {
     await e.DB.prepare("DELETE FROM portal_push WHERE user_id=? AND endpoint=?").bind(ses.user.id, String(b.endpoint || "")).run();
     return json({ ok: true });
   }
+  if (seg[0] === "app-links" && seg[1]) {
+    await rateLimit(e, "app-link-check:" + ses.user.id, 30, 600);
+    if (!seg[2] && method === "GET") return json(await lookupLink(e, seg[1]));
+    if (seg[2] === "confirm" && method === "POST") return json(await decideLink(e, seg[1], ses.user.id, true));
+    if (seg[2] === "deny" && method === "POST") return json(await decideLink(e, seg[1], ses.user.id, false));
+  }
+  if (path === "/app-tokens" && method === "GET") return json({ items: await listAppTokens(e, ses.user.id) });
+  if (seg[0] === "app-tokens" && seg[1] && method === "DELETE") {
+    await revokeAppToken(e, ses.user.id, seg[1]);
+    return json({ ok: true });
+  }
   if (path === "/me/password" && method === "POST") return changePassword(req, e, ses, await readJson(req, 4000));
   if (path === "/tg/link" && method === "POST") return startTelegramLink(req, e, ses);
   if (path === "/tg/unlink" && method === "POST") return unlinkTelegram(e, ses);
@@ -400,7 +413,7 @@ export async function handleApi(req, e, ctx, url) {
 }
 
 export function apiError(err) {
-  if (err instanceof HttpError) return json({ error: err.message, ...(err.extra || {}) }, err.status);
+  if (err instanceof HttpError) return json({ error: err.message, ...(err.extra || {}) }, err.status, err.extra?.retry_after ? { "retry-after": String(err.extra.retry_after) } : {});
   console.error("Portal API failure", err?.stack || String(err));
   return json({ error: "Внутренняя ошибка сервера. Попробуйте ещё раз." }, 500);
 }

@@ -26,7 +26,7 @@ export function shapeTicket(r, ses) {
     how_it_works: r.how_it_works, purpose: r.purpose,
     device: { model: r.device_model, android: r.android, app_version: r.app_version, firmware: r.firmware },
     status: r.status, priority: r.priority, fixed_version: r.fixed_version, status_note: r.status_note,
-    pinned: !!r.pinned, hidden: !!r.hidden, duplicate_of: r.dup_code || null,
+    pinned: !!r.pinned, hidden: !!r.hidden, duplicate_of: r.dup_code || null, source: r.source || "web",
     votes: r.votes, confirms: r.confirms, comments: r.comments,
     created: r.created, updated: r.updated, activity: r.activity, resolved: r.resolved,
     author: { name: displayName(author), is_admin: !!ses.admins?.has(r.author_id), me: r.author_id === ses.user.id },
@@ -116,6 +116,10 @@ export async function listTickets(e, ses, q) {
     binds.push("%" + likeEscape(device) + "%");
   }
   if (q.get("pinned") === "1") where.push("t.pinned=1");
+  if (/^\d{1,12}$/.test(q.get("updated_after") || "")) {
+    where.push("t.updated>?");
+    binds.push(Number(q.get("updated_after")));
+  }
   if (ses.isAdmin && q.get("hidden") === "1") where.push("t.hidden=1");
   if (ses.isAdmin && /^u[a-z0-9]{15}$/.test(q.get("author") || "")) {
     where.push("t.author_id=?");
@@ -235,13 +239,29 @@ function readFields(kind, body, partial = false) {
   return f;
 }
 
-export async function createTicket(e, ctx, ses, body) {
+/** Validates a device described by the QVK app (not a saved profile device). */
+export function readAppDevice(d) {
+  if (!d || typeof d !== "object") fail(400, "Не переданы данные устройства", { code: "validation" });
+  const out = {
+    model: clean(d.model, 60, { multiline: false }),
+    android: clean(d.android, 20, { multiline: false }),
+    app_version: clean(d.app_version, 64, { multiline: false }),
+    firmware: clean(d.firmware, 80, { multiline: false }) || null,
+  };
+  if (out.model.length < 2) fail(400, "Не указана модель устройства", { code: "validation" });
+  if (!out.android) fail(400, "Не указана версия Android", { code: "validation" });
+  if (!out.app_version) fail(400, "Не указана версия приложения", { code: "validation" });
+  return out;
+}
+
+export async function createTicket(e, ctx, ses, body, opts = {}) {
   const kind = oneOf(body.kind, ["bug", "idea"]);
   if (!kind) fail(400, "Неизвестный тип обращения");
   await rateLimit(e, "create:" + ses.user.id, 12, 3600);
   const f = readFields(kind, body);
   let device = null;
-  if (body.device_id != null) {
+  if (opts.device) device = opts.device;
+  else if (body.device_id != null) {
     device = await e.DB.prepare("SELECT * FROM portal_devices WHERE id=? AND user_id=?").bind(Number(body.device_id), ses.user.id).first();
     if (!device) fail(400, "Устройство не найдено — выберите его в профиле");
   } else if (kind === "bug") fail(400, "Укажите устройство, на котором возникла ошибка");
@@ -250,12 +270,12 @@ export async function createTicket(e, ctx, ses, body) {
   const code = (kind === "bug" ? "BUG-" : "IDEA-") + String(num).padStart(4, "0");
   const t = now();
   const res = await e.DB.prepare(
-    `INSERT INTO portal_tickets(kind,num,code,author_id,category,title,description,steps,expected,actual,frequency,how_it_works,purpose,device_model,android,app_version,firmware,status,priority,created,updated,activity,search)
-     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    `INSERT INTO portal_tickets(kind,num,code,author_id,category,title,description,steps,expected,actual,frequency,how_it_works,purpose,device_model,android,app_version,firmware,status,priority,created,updated,activity,search,source)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   ).bind(
     kind, num, code, ses.user.id, f.category, f.title, f.description, f.steps || "", f.expected || "", f.actual || "", f.frequency || null,
     f.how_it_works || "", f.purpose || "", device?.model || null, device?.android || null, device?.app_version || null, device?.firmware || null,
-    "new", "normal", t, t, t, searchText({ code, ...f }),
+    "new", "normal", t, t, t, searchText({ code, ...f }), opts.source === "app" ? "app" : "web",
   ).run();
   const id = res.meta.last_row_id;
   await e.DB.batch([
@@ -264,7 +284,7 @@ export async function createTicket(e, ctx, ses, body) {
   ]);
   await linkAttachments(e, ses.user.id, body.attachments, id);
   await bump(e);
-  await notifyAdmins(e, ctx, ses.user.id, { id, code, kind }, (kind === "bug" ? "🐛 Новый баг " : "💡 Новое предложение ") + code + "\n" + f.title + "\nАвтор: " + displayName(ses.user));
+  await notifyAdmins(e, ctx, ses.user.id, { id, code, kind }, (kind === "bug" ? "🐛 Новый баг " : "💡 Новое предложение ") + code + (opts.source === "app" ? " · 📱 из приложения" : "") + "\n" + f.title + "\nАвтор: " + displayName(ses.user));
   return { ok: true, code };
 }
 

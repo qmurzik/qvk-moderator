@@ -64,16 +64,33 @@ export async function upload(req, e, ses) {
   }
   const file = form.get("file");
   if (!file || typeof file === "string") fail(400, "Файл не передан");
+  const att = await storeFile(e, ses.user.id, file);
+  return json({ ok: true, attachment: { ...att, url: "/files/" + att.id } });
+}
+
+/** Policy for the QVK app API: screenshots and logs only, 5 MB each. */
+export const APP_POLICY = {
+  allowed: ["image/jpeg", "image/png", "image/webp", "text/plain", "application/zip"],
+  maxBytes: 5 * 1024 * 1024,
+  message: "Этот тип файла не поддерживается. Разрешены скриншоты JPG, PNG, WEBP и логи TXT/LOG или ZIP.",
+};
+
+/**
+ * Validates (by magic bytes) and stores one uploaded File. Returns {id,name,mime,size}.
+ * Without `policy` the web rules apply (images, video, logs, ZIP, PDF; per-type limits).
+ */
+export async function storeFile(e, userId, file, policy = null) {
   const name = clean(file.name || "file", 120, { multiline: false }).replace(/[\\/:*?"<>|]/g, "_") || "file";
-  if (file.size <= 0) fail(400, "Пустой файл");
+  if (file.size <= 0) fail(400, `Файл «${name}» пустой`, { code: "validation" });
+  if (policy && file.size > policy.maxBytes) fail(413, `Файл «${name}» больше ${Math.round(policy.maxBytes / 1048576)} МБ`, { code: "file_too_large" });
   const bytes = new Uint8Array(await file.arrayBuffer());
   const mime = sniff(bytes, file.type, name);
-  if (!mime) fail(415, "Этот тип файла не поддерживается. Разрешены JPG, PNG, WEBP, GIF, MP4, MOV, WEBM, TXT/LOG, ZIP, PDF.");
-  const max = maxBytesFor(mime);
-  if (bytes.length > max) fail(413, `Файл больше ${Math.round(max / 1024 / 1024)} МБ`);
+  if (!mime || (policy && !policy.allowed.includes(mime))) fail(415, policy ? policy.message.replace("Этот тип", `Тип файла «${name}»`) : "Этот тип файла не поддерживается. Разрешены JPG, PNG, WEBP, GIF, MP4, MOV, WEBM, TXT/LOG, ZIP, PDF.", { code: "unsupported_file" });
+  const max = policy ? policy.maxBytes : maxBytesFor(mime);
+  if (bytes.length > max) fail(413, `Файл «${name}» больше ${Math.round(max / 1024 / 1024)} МБ`, { code: "file_too_large" });
   // Orphan clean-up: attachments never linked to a ticket within a day.
   const stale = await e.DB.prepare("SELECT id,storage FROM portal_attachments WHERE ticket_id IS NULL AND created<? LIMIT 20").bind(now() - 86400).all();
-  for (const s of stale.results || []) await removeAttachment(e, s);
+  for (const st of stale.results || []) await removeAttachment(e, st);
 
   const id = randomId(20);
   let storage = "d1";
@@ -82,16 +99,14 @@ export async function upload(req, e, ses) {
     await e.FILES.put("att/" + id, bytes, { httpMetadata: { contentType: mime } });
     storage = "r2";
   } else {
-    const stmts = [];
     for (let i = 0; i * CHUNK < bytes.length; i++) {
-      stmts.push(e.DB.prepare("INSERT INTO portal_chunks(att_id,idx,data) VALUES(?,?,?)").bind(id, i, bytes.slice(i * CHUNK, (i + 1) * CHUNK)));
+      await e.DB.prepare("INSERT INTO portal_chunks(att_id,idx,data) VALUES(?,?,?)").bind(id, i, bytes.slice(i * CHUNK, (i + 1) * CHUNK)).run();
+      chunks++;
     }
-    chunks = stmts.length;
-    for (const st of stmts) await st.run();
   }
   await e.DB.prepare("INSERT INTO portal_attachments(id,user_id,name,mime,size,storage,chunks,created) VALUES(?,?,?,?,?,?,?,?)")
-    .bind(id, ses.user.id, name, mime, bytes.length, storage, chunks, now()).run();
-  return json({ ok: true, attachment: { id, name, mime, size: bytes.length, url: "/files/" + id } });
+    .bind(id, String(userId), name, mime, bytes.length, storage, chunks, now()).run();
+  return { id, name, mime, size: bytes.length };
 }
 
 export async function removeAttachment(e, att) {

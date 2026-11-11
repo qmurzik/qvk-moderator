@@ -2,7 +2,7 @@
 // existing moderator tables are never touched. The same statements are
 // written to migrations/0001_portal.sql by scripts/build-portal.mjs.
 
-export const SCHEMA_VERSION = "3";
+export const SCHEMA_VERSION = "4";
 
 // v2: nickname + password accounts; Telegram is linked optionally (DMs, admin rights).
 export const MIGRATION_V2 = [
@@ -22,6 +22,14 @@ export const MIGRATION_V3 = [
   `CREATE TABLE IF NOT EXISTS portal_push(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,endpoint TEXT NOT NULL UNIQUE,p256dh TEXT NOT NULL,auth TEXT NOT NULL,ua TEXT,created INTEGER NOT NULL)`,
   `CREATE INDEX IF NOT EXISTS portal_push_user ON portal_push(user_id)`,
   `CREATE TABLE IF NOT EXISTS portal_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,channel TEXT NOT NULL,target TEXT NOT NULL,payload TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,claimed INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL)`,
+];
+
+// v4: QVK app API — personal app tokens, device linking codes, ticket source.
+export const MIGRATION_V4 = [
+  `ALTER TABLE portal_tickets ADD COLUMN source TEXT NOT NULL DEFAULT 'web'`,
+  `CREATE TABLE IF NOT EXISTS portal_app_tokens(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,name TEXT NOT NULL,created INTEGER NOT NULL,last_used INTEGER NOT NULL,revoked INTEGER NOT NULL DEFAULT 0)`,
+  `CREATE INDEX IF NOT EXISTS portal_app_tokens_user ON portal_app_tokens(user_id)`,
+  `CREATE TABLE IF NOT EXISTS portal_app_links(id INTEGER PRIMARY KEY AUTOINCREMENT,code TEXT NOT NULL UNIQUE,poll_hash TEXT NOT NULL UNIQUE,device_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'pending',user_id TEXT,created INTEGER NOT NULL,expires INTEGER NOT NULL)`,
 ];
 
 /** Runs statements, skipping ADD COLUMN for columns that already exist (idempotent). */
@@ -86,6 +94,7 @@ export async function ensureSchema(e) {
     if (version < "1") await e.DB.batch(SCHEMA.map((sql) => e.DB.prepare(sql)));
     if (version < "2") await applyMigration(e, MIGRATION_V2);
     if (version < "3") await applyMigration(e, MIGRATION_V3);
+    if (version < "4") await applyMigration(e, MIGRATION_V4);
     await e.DB.prepare(
       "INSERT INTO portal_settings(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     ).bind(SCHEMA_VERSION).run();
