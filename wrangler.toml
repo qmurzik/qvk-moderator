@@ -2,6 +2,10 @@ name = "qvk-moderator"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
+# QVK Beta Portal: delivers queued news broadcasts (Telegram + browser push).
+[triggers]
+crons = ["*/2 * * * *"]
+
 [vars]
 AI_MODEL = "@cf/meta/llama-3.1-8b-instruct-fp8"
 

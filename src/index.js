@@ -13,7 +13,7 @@ import {page,appApi} from "./miniapp.js";
 import {supportMessage,autoSupport} from "./support.js";
 import {createRecord} from "./workflows.js";
 import {registerAppeal,requestAppeal} from "./appeals.js";
-import {portal,isPortalPath,portalBotStart,portalBotCallback} from "./portal/index.js";
+import {portal,isPortalPath,portalBotStart,portalBotCallback,portalScheduled} from "./portal/index.js";
 const S={enabled:"on",ai:"on",join_cleanup:"on",antispam:"on",spam_action:"warn",links:"on",topic_action:"delete",self_test:"on"};
 const now=()=>Math.floor(Date.now()/1000);
 const safe=s=>String(s??"").slice(0,150);
@@ -379,7 +379,7 @@ async function pluginWarning(req,e){
   return Response.json({ok:true});
  }catch(err){console.error("Plugin warning delivery",String(err));return Response.json({error:"Не удалось отправить сообщение: проверь права бота и исходное сообщение"},{status:502})}
 }
-export default {async queue(batch,e){for(const message of batch.messages){const data=message.body;if(!data||!/^-[0-9]{5,20}$/.test(data.chat)||!Array.isArray(data.ids)){message.ack();continue}for(const id of data.ids){try{await api(e,"deleteMessage",{chat_id:data.chat,message_id:id})}catch(err){console.warn("Reputation cleanup failed",String(err))}}message.ack()}},async fetch(req,e,ctx){
+export default {async scheduled(event,e,ctx){ctx.waitUntil(portalScheduled(e).catch(err=>console.warn("Portal cron failed",String(err))))},async queue(batch,e){for(const message of batch.messages){const data=message.body;if(!data||!/^-[0-9]{5,20}$/.test(data.chat)||!Array.isArray(data.ids)){message.ack();continue}for(const id of data.ids){try{await api(e,"deleteMessage",{chat_id:data.chat,message_id:id})}catch(err){console.warn("Reputation cleanup failed",String(err))}}message.ack()}},async fetch(req,e,ctx){
  const url=new URL(req.url);
  if(req.method==="GET"&&url.pathname==="/health")return new Response("QVK Moderator ready");
  if(isPortalPath(url.pathname))return portal(req,e,ctx);

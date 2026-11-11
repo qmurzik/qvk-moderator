@@ -1,6 +1,7 @@
 // QVK Beta Portal — notification centre + optional Telegram DMs via the existing bot.
 import { tg, escapeTgHtml } from "./telegram.js";
 import { now, getSetting, admins } from "./util.js";
+import { queuePushForUser, drainOutbox } from "./broadcast.js";
 
 
 /**
@@ -11,7 +12,16 @@ export async function notify(e, ctx, { userId, actorId, ticket, type, text }) {
   if (!userId || String(userId) === String(actorId ?? "")) return;
   await e.DB.prepare("INSERT INTO portal_notifications(user_id,ticket_id,type,text,created) VALUES(?,?,?,?,?)")
     .bind(String(userId), ticket?.id ?? null, type, text.slice(0, 400), now()).run();
-  const job = sendDm(e, userId, ticket, text).catch((err) => console.warn("Portal DM failed", String(err)));
+  await queuePushForUser(e, userId, {
+    title: ticket?.code ? "QVK Beta · " + ticket.code : "QVK Beta Portal",
+    body: text.slice(0, 200),
+    url: ticket?.code ? "/" + (ticket.kind === "bug" ? "bugs" : "ideas") + "/" + ticket.code : "/notifications",
+    tag: ticket?.code || "portal",
+  });
+  const job = Promise.all([
+    sendDm(e, userId, ticket, text).catch((err) => console.warn("Portal DM failed", String(err))),
+    drainOutbox(e).catch((err) => console.warn("Push drain failed", String(err))),
+  ]);
   if (ctx?.waitUntil) ctx.waitUntil(job);
   else await job;
 }

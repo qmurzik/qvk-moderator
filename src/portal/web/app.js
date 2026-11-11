@@ -439,6 +439,7 @@
     renderShell();
     startPolling();
     run();
+    syncPush();
   }
   async function reloadMe() { const me = await GET("/me"); S.me = me; return me; }
 
@@ -1092,7 +1093,7 @@
     const load = async () => {
       const r = await GET("/posts");
       set(view, html`<div class="page-head"><div class="grow"><h1>Обновления</h1><p>Объявления команды и списки изменений бета-версий</p></div>${S.me.is_admin ? html`<button class="btn primary" id="np">${I("plus")}Новая запись</button>` : ""}</div>
-        <div class="stack stagger">${r.items.length ? r.items.map((p) => html`<div>${postCard(p)}${S.me.is_admin ? html`<div class="row" style="margin:6px 4px 0"><button class="btn ghost sm" data-ep="${p.id}">${I("edit", "s")}Изменить</button><button class="btn ghost sm" data-dp="${p.id}">${I("trash", "s")}Удалить</button></div>` : ""}</div>`) : empty("megaphone", "Записей пока нет", "Здесь появятся объявления и списки изменений.")}</div>`);
+        <div class="stack stagger">${r.items.length ? r.items.map((p) => html`<div>${postCard(p)}${S.me.is_admin ? html`<div class="row" style="margin:6px 4px 0">${p.recipients ? html`<span class="faint" style="font-size:12.5px;margin-right:6px">${I("send", "s")} разослано: ${p.recipients}</span>` : ""}<button class="btn ghost sm" data-ep="${p.id}">${I("edit", "s")}Изменить</button><button class="btn ghost sm" data-dp="${p.id}">${I("trash", "s")}Удалить</button></div>` : ""}</div>`) : empty("megaphone", "Записей пока нет", "Здесь появятся объявления и списки изменений.")}</div>`);
       if (!S.me.is_admin) return;
       $("#np", view).onclick = () => postSheet(null, load);
       $$("[data-ep]", view).forEach((b) => (b.onclick = () => postSheet(r.items.find((p) => String(p.id) === b.dataset.ep), load)));
@@ -1108,12 +1109,18 @@
         <label class="f">Версия <small>необязательно</small><input name="version" maxlength="32" value="${p?.version || ""}" placeholder="${S.me.settings.current_version}"></label>
         <label class="f">Текст<textarea name="body" rows="7">${p?.body || ""}</textarea></label>
         <label class="switch"><input type="checkbox" name="pinned" ${p?.pinned ? "checked" : ""}><span class="t">Закрепить сверху</span></label>
+        ${p ? "" : html`<label class="switch"><input type="checkbox" name="notify" checked><span class="t">Разослать тестировщикам<small>В Telegram — тем, у кого он привязан, и пуш-уведомлением — у кого они включены в браузере</small></span></label>`}
         <button class="btn primary block">${I("check")}Опубликовать</button></form>`);
       $("#pf", b).onsubmit = async (e) => {
         e.preventDefault();
         const f = readForm(e.target);
         f.kind = $('input[name="kind"]:checked', e.target).value;
-        try { p ? await api("PUT", "/admin/posts/" + p.id, f) : await POST("/admin/posts", f); close(); toast("Запись опубликована"); done(); } catch (err) { fail(err); }
+        try {
+          const r = p ? await api("PUT", "/admin/posts/" + p.id, f) : await POST("/admin/posts", f);
+          close();
+          toast(r.sent ? `Опубликовано · Telegram: ${r.sent.telegram}, пуш: ${r.sent.push}` : "Запись опубликована");
+          done();
+        } catch (err) { fail(err); }
       };
     });
   }
@@ -1138,10 +1145,10 @@
     set(view, skPage());
     const load = async () => {
       const r = await GET("/notifications");
-      const ic = { status: "refresh", comment: "message", need_info: "alert", verify: "refresh", fixed: "check", implemented: "sparkles" };
+      const ic = { status: "refresh", comment: "message", need_info: "alert", verify: "refresh", fixed: "check", implemented: "sparkles", news: "megaphone" };
       set(view, html`<div class="page-head"><div class="grow"><h1>Уведомления</h1><p>Изменения статусов и ответы команды</p></div>${r.items.some((n) => !n.read) ? html`<button class="btn" id="ra">${I("check")}Прочитать все</button>` : ""}</div>
         ${!S.me.user.tg_linked || !S.me.user.notify_tg || S.me.user.tg_blocked ? html`<a class="callout row" style="--c:var(--accent);color:var(--text)" href="/profile">${I("telegram")}<span>Хотите получать уведомления в Telegram? Подключите его в профиле — это займёт 10 секунд.</span>${I("right", "right")}</a>` : ""}
-        <div class="stack stagger">${r.items.length ? r.items.map((n) => html`<button class="notif ${n.read ? "" : "unread"}" data-n="${n.id}" data-href="${n.code ? "/" + (n.kind === "bug" ? "bugs" : "ideas") + "/" + n.code : ""}"><span class="ni">${I(ic[n.type] || "bell")}</span><span style="flex:1;min-width:0"><span class="tx">${n.text}</span><small class="faint" style="display:block;margin-top:4px">${rel(n.created)}${n.code ? " · " + n.code : ""}</small></span>${n.read ? "" : raw('<span class="dot"></span>')}</button>`) : empty("bell", "Уведомлений нет", "Здесь появятся изменения статусов ваших обращений и ответы команды.")}</div>`);
+        <div class="stack stagger">${r.items.length ? r.items.map((n) => html`<button class="notif ${n.read ? "" : "unread"}" data-n="${n.id}" data-href="${n.code ? "/" + (n.kind === "bug" ? "bugs" : "ideas") + "/" + n.code : n.type === "news" ? "/updates" : ""}"><span class="ni">${I(ic[n.type] || "bell")}</span><span style="flex:1;min-width:0"><span class="tx">${n.text}</span><small class="faint" style="display:block;margin-top:4px">${rel(n.created)}${n.code ? " · " + n.code : ""}</small></span>${n.read ? "" : raw('<span class="dot"></span>')}</button>`) : empty("bell", "Уведомлений нет", "Здесь появятся изменения статусов ваших обращений и ответы команды.")}</div>`);
       $("#ra", view) && ($("#ra", view).onclick = async () => { await POST("/notifications/read", {}); updateUnread(0); load(); });
       $$("[data-n]", view).forEach((b) => (b.onclick = async () => {
         POST("/notifications/read", { ids: [Number(b.dataset.n)] }).then(() => pulse()).catch(() => {});
@@ -1152,6 +1159,55 @@
   });
 
   // ---------------------------------------------------------------- profile
+  // ---------------------------------------------------------------- web push
+  const pushSupported = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isStandalone = () => matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const b64ToBytes = (s) => { s = s.replace(/-/g, "+").replace(/_/g, "/"); return Uint8Array.from(atob(s + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)); };
+  async function currentPushSub() {
+    if (!pushSupported()) return null;
+    const reg = await navigator.serviceWorker.getRegistration("/");
+    return reg ? reg.pushManager.getSubscription() : null;
+  }
+  async function enablePush() {
+    const reg = await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+    await navigator.serviceWorker.ready;
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error(perm === "denied" ? "Уведомления запрещены в настройках браузера для этого сайта" : "Разрешение не получено");
+    const { publicKey } = await GET("/push/key");
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(publicKey) });
+    await POST("/push/subscribe", sub.toJSON());
+  }
+  async function disablePush() {
+    const sub = await currentPushSub();
+    if (sub) { await POST("/push/unsubscribe", { endpoint: sub.endpoint }).catch(() => {}); await sub.unsubscribe().catch(() => {}); }
+  }
+  /** Keeps an existing browser subscription bound to the signed-in account. */
+  async function syncPush() {
+    try { const sub = await currentPushSub(); if (sub && Notification.permission === "granted") await POST("/push/subscribe", sub.toJSON()); } catch { /* ignore */ }
+  }
+  async function drawPush(view) {
+    const st = $("#push-st", view), btn = $("#push-btn", view);
+    if (!st) return;
+    if (!pushSupported()) {
+      st.textContent = isIOS() && !isStandalone() ? "На iPhone: «Поделиться» → «На экран „Домой“», откройте портал с иконки и включите здесь." : "Этот браузер не поддерживает пуш-уведомления.";
+      set(btn, "");
+      return;
+    }
+    const sub = await currentPushSub().catch(() => null);
+    const on = !!sub && Notification.permission === "granted";
+    st.textContent = on ? "Включены в этом браузере. Приходят новости и изменения ваших обращений." : Notification.permission === "denied" ? "Запрещены в настройках браузера — разрешите уведомления для сайта." : "Выключены. Включите, чтобы получать уведомления даже при закрытой вкладке.";
+    set(btn, on ? html`<button class="btn sm" data-push="off">Выключить</button>` : html`<button class="btn primary sm" data-push="on">${I("bell", "s")}Включить</button>`);
+    $("[data-push]", btn).onclick = async (e) => {
+      e.target.disabled = true;
+      try {
+        if (e.target.dataset.push === "on") { await enablePush(); toast("Пуш-уведомления включены"); } else { await disablePush(); toast("Пуш-уведомления выключены"); }
+      } catch (err) { fail(err); }
+      drawPush(view);
+    };
+  }
+
   route(/^\/profile$/, async (m, view) => {
     const draw = () => {
       const me = S.me, u = me.user;
@@ -1166,6 +1222,9 @@
           <div class="row wrap" style="padding:10px 0;gap:12px"><span class="di" style="width:40px;height:40px;border-radius:12px;background:var(--surface2);display:grid;place-items:center;color:var(--accent)">${I("telegram")}</span><span style="flex:1;min-width:180px"><b>Telegram</b><small class="muted" style="display:block;font-size:13px">${u.tg_linked ? (u.tg_blocked ? "Привязан, но бот не может вам написать — откройте бота и нажмите «Запустить»." : "Привязан" + (u.username ? " · @" + u.username : "") + ". Уведомления приходят в личные сообщения бота.") : "Не привязан. Подключите, чтобы получать уведомления в Telegram."}</small></span>
             ${u.tg_linked ? html`<button class="btn sm" id="tgun">Отвязать</button>` : html`<button class="btn primary sm" id="tglink">${I("telegram", "s")}Подключить</button>`}</div>
           ${u.tg_linked ? html`<label class="switch"><input type="checkbox" id="ntg" ${u.notify_tg ? "checked" : ""}><span class="t">Уведомления в Telegram<small>Бот пришлёт сообщение, когда статус ваших обращений изменится</small></span></label>` : ""}
+          <label class="switch"><input type="checkbox" id="nnews" ${u.notify_news !== false ? "checked" : ""}><span class="t">Новости и списки изменений<small>Присылать объявления команды в Telegram и пуш-уведомлениями</small></span></label>
+          <div class="hr" style="margin:6px 0"></div>
+          <div class="row wrap" style="padding:10px 0;gap:12px" id="push-row"><span class="di" style="width:40px;height:40px;border-radius:12px;background:var(--surface2);display:grid;place-items:center;color:var(--accent)">${I("bell")}</span><span style="flex:1;min-width:180px"><b>Пуш-уведомления в браузере</b><small class="muted" style="display:block;font-size:13px" id="push-st">Проверяем…</small></span><span id="push-btn"></span></div>
           <div class="hr" style="margin:6px 0"></div>
           <div class="row between wrap" style="padding:8px 0"><span><b>Пароль</b><small class="muted" style="display:block;font-size:13px">Вход: ник <b>${u.nick || u.name}</b> и пароль</small></span><button class="btn sm" id="pwd">${I("key", "s")}Сменить пароль</button></div>
           <div class="hr" style="margin:6px 0"></div>
@@ -1197,8 +1256,10 @@
           try { await POST("/me/password", { current: f.current.value, password: f.password.value }); close(); toast("Пароль изменён"); } catch (err) { fail(err); }
         };
       });
+      $("#nnews", view).onchange = async (e) => { try { await api("PATCH", "/me", { notify_news: e.target.checked }); await reloadMe(); toast(e.target.checked ? "Новости включены" : "Новости выключены"); } catch (err) { fail(err); } };
+      drawPush(view);
       if ($("#ntg", view)) $("#ntg", view).onchange = async (e) => { try { await api("PATCH", "/me", { notify_tg: e.target.checked }); await reloadMe(); toast(e.target.checked ? "Уведомления включены" : "Уведомления выключены"); draw(); } catch (err) { fail(err); } };
-      $("#logout", view).onclick = async () => { await POST("/auth/logout").catch(() => {}); location.href = "/"; };
+      $("#logout", view).onclick = async () => { await disablePush().catch(() => {}); await POST("/auth/logout").catch(() => {}); location.href = "/"; };
       $("#delp", view).onclick = async () => { if (!(await confirmSheet("Удалить профиль?", "Устройства, черновики, избранное и уведомления будут удалены безвозвратно. Отчёты останутся без имени автора.", "Удалить профиль", true))) return; try { await api("DELETE", "/me"); location.href = "/"; } catch (err) { fail(err); } };
     };
     const devSheet = (d) => sheet(d ? "Изменить устройство" : "Новое устройство", (b, close) => {

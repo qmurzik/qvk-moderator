@@ -2,7 +2,7 @@
 // Run automatically by `npm run deploy` (predeploy) and `npm test` (pretest).
 import { readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { SCHEMA, MIGRATION_V2 } from "../src/portal/schema.js";
+import { SCHEMA, MIGRATION_V2, MIGRATION_V3 } from "../src/portal/schema.js";
 
 const root = new URL("../", import.meta.url);
 const js = readFileSync(new URL("src/portal/web/app.js", root), "utf8");
@@ -22,5 +22,9 @@ writeFileSync(
 writeFileSync(
   new URL("migrations/0002_portal_nick_auth.sql", root),
   "-- QVK Beta Portal v2: nickname + password accounts, optional Telegram link.\n" + MIGRATION_V2.map((s) => s + ";").join("\n") + "\n",
+);
+writeFileSync(
+  new URL("migrations/0003_portal_news_push.sql", root),
+  "-- QVK Beta Portal v3: news broadcast (Telegram + Web Push). The Worker also applies it on first request.\n" + MIGRATION_V3.map((s) => s + ";").join("\n") + "\n",
 );
 console.log("portal assets built", hash);

@@ -2,6 +2,7 @@
 import { ensureSchema } from "./schema.js";
 import { handleApi, apiError, adminStats, adminUsers, adminSettings, savePost, settingsSnapshot } from "./api.js";
 import { handleMcp } from "./mcp.js";
+import { drainOutbox } from "./broadcast.js";
 import { loadSession, adminUserIds } from "./auth.js";
 import { serveFile } from "./files.js";
 import { canSeeTicketId } from "./tickets.js";
@@ -15,7 +16,7 @@ const PAGES = new Set(["/", "/login", "/my", "/all", "/known", "/fixes", "/updat
 
 /** Paths owned by the portal. Existing moderator routes (/app, /bug-form, /api/app, /webhook…) are untouched. */
 export function isPortalPath(p) {
-  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p === "/mcp" || p.startsWith("/mcp/") || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/manifest.webmanifest";
+  return PAGES.has(p) || PAGE_PREFIXES.some((x) => p.startsWith(x)) || p.startsWith("/api/p/") || p === "/api/p" || p === "/mcp" || p.startsWith("/mcp/") || p.startsWith("/files/") || p.startsWith("/assets/portal.") || p === "/favicon.svg" || p === "/sw.js" || p === "/manifest.webmanifest";
 }
 
 const CSP = [
@@ -24,6 +25,7 @@ const CSP = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: https://t.me https://*.telegram.org https://telegram.org https://*.telesco.pe",
   "media-src 'self' blob:",
+  "worker-src 'self'",
   "connect-src 'self'",
     "object-src 'none'",
   "base-uri 'none'",
@@ -32,6 +34,34 @@ const CSP = [
 ].join("; ");
 
 const FAVICON = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c4a1ff"/><stop offset="1" stop-color="#6a4be0"/></linearGradient></defs><rect width="64" height="64" rx="18" fill="url(#g)"/><path d="M20 30a12 12 0 1 1 20.5 8.5L45 43" fill="none" stroke="#fff" stroke-width="5.5" stroke-linecap="round"/></svg>`;
+
+// Service worker: shows Web Push notifications and opens the right page on click.
+const SERVICE_WORKER = `self.addEventListener("install", () => self.skipWaiting());
+self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("push", (event) => {
+  let d = {};
+  try { d = event.data ? event.data.json() : {}; } catch (e) { d = { body: event.data && event.data.text() }; }
+  event.waitUntil(self.registration.showNotification(d.title || "QVK Beta Portal", {
+    body: d.body || "", tag: d.tag || undefined, icon: "/favicon.svg", badge: "/favicon.svg",
+    data: { url: typeof d.url === "string" && d.url.startsWith("/") ? d.url : "/" }
+  }));
+});
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  const url = new URL(event.notification.data && event.notification.data.url || "/", self.location.origin).href;
+  event.waitUntil(self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((list) => {
+    for (const c of list) if (c.url.startsWith(self.location.origin) && "focus" in c) { c.navigate(url); return c.focus(); }
+    return self.clients.openWindow(url);
+  }));
+});
+`;
+
+/** Cron handler: delivers queued news/push messages. */
+export async function portalScheduled(e) {
+  if (!e.DB) return;
+  await ensureSchema(e);
+  await drainOutbox(e, 1);
+}
 
 function shell() {
   return `<!doctype html>
@@ -66,6 +96,9 @@ export async function portal(req, e, ctx) {
   const p = url.pathname;
   try {
     if (p === "/favicon.svg") return new Response(FAVICON, { headers: { "content-type": "image/svg+xml", "cache-control": "public, max-age=86400" } });
+    if (p === "/sw.js") {
+      return new Response(SERVICE_WORKER, { headers: { "content-type": "text/javascript; charset=utf-8", "cache-control": "no-cache", "x-content-type-options": "nosniff" } });
+    }
     if (p.startsWith("/assets/portal.")) {
       const isJs = p === "/assets/portal.js";
       const isCss = p === "/assets/portal.css";

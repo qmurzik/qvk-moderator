@@ -29,8 +29,34 @@ globalThis.fetch = async (url, init) => {
     if (method === "sendMessage" && String(body.chat_id) === "666") return Response.json({ ok: false, error_code: 403, description: "Forbidden: bot was blocked by the user" }, { status: 403 });
     return Response.json({ ok: true, result: method === "getMe" ? { username: "qvk_test_bot" } : method === "sendMessage" ? { message_id: 1 } : true });
   }
+  if (u.startsWith("https://fcm.googleapis.com/")) {
+    pushes.push({ url: u, headers: Object.fromEntries(new Headers(init.headers)), body: new Uint8Array(init.body) });
+    return new Response(null, { status: u.endsWith("/gone") ? 410 : 201 });
+  }
   throw new Error("Unexpected fetch " + u);
 };
+const pushes = [];
+
+/** A fake browser push subscription with its private key, to decrypt what the server sends. */
+async function fakeBrowser(name) {
+  const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]);
+  const auth = crypto.getRandomValues(new Uint8Array(16));
+  const b64u = (b) => Buffer.from(b).toString("base64url");
+  return { kp, auth, sub: { endpoint: "https://fcm.googleapis.com/fcm/send/" + name, keys: { p256dh: b64u(await crypto.subtle.exportKey("raw", kp.publicKey)), auth: b64u(auth) } } };
+}
+async function decryptPush(browser, body) {
+  const hk = async (salt, ikm, info, n) => new Uint8Array(await crypto.subtle.deriveBits({ name: "HKDF", hash: "SHA-256", salt, info }, await crypto.subtle.importKey("raw", ikm, "HKDF", false, ["deriveBits"]), n * 8));
+  const salt = body.slice(0, 16), idlen = body[20], asPub = body.slice(21, 21 + idlen), ct = body.slice(21 + idlen);
+  const uaPub = new Uint8Array(await crypto.subtle.exportKey("raw", browser.kp.publicKey));
+  const ecdh = new Uint8Array(await crypto.subtle.deriveBits({ name: "ECDH", public: await crypto.subtle.importKey("raw", asPub, { name: "ECDH", namedCurve: "P-256" }, false, []) }, browser.kp.privateKey, 256));
+  const te = new TextEncoder();
+  const ikm = await hk(browser.auth, ecdh, Buffer.concat([te.encode("WebPush: info\0"), uaPub, asPub]), 32);
+  const cek = await hk(salt, ikm, te.encode("Content-Encoding: aes128gcm\0"), 16);
+  const nonce = await hk(salt, ikm, te.encode("Content-Encoding: nonce\0"), 12);
+  const pt = new Uint8Array(await crypto.subtle.decrypt({ name: "AES-GCM", iv: nonce }, await crypto.subtle.importKey("raw", cek, "AES-GCM", false, ["decrypt"]), ct));
+  assert.equal(pt[pt.length - 1], 2, "last-record delimiter");
+  return JSON.parse(new TextDecoder().decode(pt.slice(0, -1)));
+}
 
 async function call(env, path, { method = "GET", body, cookie, csrf, headers = {}, raw } = {}) {
   const h = new Headers({ origin: ORIGIN, "x-qvk": "1", ...headers });
@@ -477,6 +503,73 @@ test("portal: MCP connector gives Claude admin access as «Команда QVK»"
   assert.ok((await X.get("/api/p/admin/mcp")).data.last_used);
   await X.send("DELETE", "/api/p/admin/mcp");
   assert.equal((await rpc("/mcp/" + key, { jsonrpc: "2.0", id: 1, method: "tools/list" })).status, 401, "revoked");
+});
+
+test("portal: news are broadcast to Telegram and browser push", async () => {
+  const env = makeEnv();
+  const admin = await login(env, ADMIN, "boss");
+  const linked = await login(env, 801, "with_tg");
+  const optout = await login(env, 802, "no_news");
+  const webOnly = await login(env, 803, "web_only", { link: false });
+  const X = as(env, admin), L = as(env, linked), O = as(env, optout), W = as(env, webOnly);
+  await O.send("PATCH", "/api/p/me", { notify_news: false });
+  // Browser subscriptions.
+  const key = (await W.get("/api/p/push/key")).data.publicKey;
+  assert.equal(Buffer.from(key, "base64url").length, 65);
+  const br = await fakeBrowser("web-only-1");
+  assert.equal((await W.send("POST", "/api/p/push/subscribe", br.sub)).status, 200);
+  assert.equal((await W.send("POST", "/api/p/push/subscribe", { ...br.sub, endpoint: "https://evil.example/push" })).status, 400, "only real push services");
+  const gone = await fakeBrowser("gone");
+  await L.send("POST", "/api/p/push/subscribe", gone.sub);
+  assert.equal((await W.get("/api/p/me")).data.user.push_count, 1);
+
+  sent.length = 0;
+  pushes.length = 0;
+  const r = await X.send("POST", "/api/p/admin/posts", { kind: "changelog", title: "Сборка 3.0.4", body: "• Исправлен плеер\n• <b>Новое</b> меню", version: "3.0.4" });
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.data.sent, { telegram: 2, push: 2 }, "admin + linked tester by Telegram (opt-out skipped), two browsers");
+  const tgNews = sent.filter((m) => m.method === "sendMessage" && /Сборка 3\.0\.4/.test(m.body.text));
+  assert.deepEqual(tgNews.map((m) => m.body.chat_id).sort(), ["801", ADMIN]);
+  assert.match(tgNews[0].body.text, /&lt;b&gt;Новое&lt;\/b&gt;/, "post text is HTML-escaped for Telegram");
+  // Push: encrypted correctly, VAPID-signed.
+  const p1 = pushes.find((x) => x.url.endsWith("web-only-1"));
+  assert.equal(p1.headers["content-encoding"], "aes128gcm");
+  const [, jwt, k] = p1.headers.authorization.match(/^vapid t=([^,]+), k=(.+)$/);
+  assert.equal(k, key);
+  const [h, c, sig] = jwt.split(".");
+  const vk = await crypto.subtle.importKey("raw", Buffer.from(key, "base64url"), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  assert.ok(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, vk, Buffer.from(sig, "base64url"), new TextEncoder().encode(h + "." + c)), "VAPID signature valid");
+  assert.equal(JSON.parse(Buffer.from(c, "base64url")).aud, "https://fcm.googleapis.com");
+  const msg = await decryptPush(br, p1.body);
+  assert.match(msg.title, /Сборка 3\.0\.4/);
+  assert.equal(msg.url, "/updates");
+  // Expired subscription removed.
+  assert.equal((await L.get("/api/p/me")).data.user.push_count, 0);
+  // In-app notification for everyone, queue drained.
+  assert.equal((await W.get("/api/p/notifications")).data.items[0].type, "news");
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) n FROM portal_outbox").first()).n, 0);
+  assert.equal((await W.get("/api/p/posts")).data.items[0].recipients, 4);
+  // notify:false publishes silently.
+  sent.length = 0; pushes.length = 0;
+  const silent = await X.send("POST", "/api/p/admin/posts", { title: "Тихая запись", body: "без рассылки", notify: false });
+  assert.equal(silent.data.sent, undefined);
+  assert.equal(sent.length + pushes.length, 0);
+  // Personal notifications also reach the browser.
+  await W.send("POST", "/api/p/devices", { model: "Pixel", android: "15", app_version: "3.0" });
+  const dev = (await W.get("/api/p/me")).data.devices[0].id;
+  await W.send("POST", "/api/p/tickets", { ...BUG, device_id: dev });
+  pushes.length = 0;
+  await X.send("POST", "/api/p/tickets/BUG-0001/admin", { status: "confirmed" });
+  const personal = await decryptPush(br, pushes.find((x) => x.url.endsWith("web-only-1")).body);
+  assert.equal(personal.url, "/bugs/BUG-0001");
+  // Large audiences are delivered in batches by the cron handler.
+  for (let i = 0; i < 50; i++) await env.DB.prepare("INSERT INTO portal_outbox(channel,target,payload,created) VALUES('tg',?,?,0)").bind(String(5000 + i), JSON.stringify({ title: "x", body: "y" })).run();
+  await worker.scheduled({}, env, { waitUntil: (p) => p });
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal((await env.DB.prepare("SELECT COUNT(*) n FROM portal_outbox").first()).n, 15, "35 per run");
+  // Service worker is served.
+  const sw = await call(env, "/sw.js");
+  assert.match(await sw.text(), /showNotification/);
 });
 
 test("portal: rate limiting of report creation", async () => {

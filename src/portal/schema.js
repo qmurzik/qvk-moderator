@@ -2,7 +2,7 @@
 // existing moderator tables are never touched. The same statements are
 // written to migrations/0001_portal.sql by scripts/build-portal.mjs.
 
-export const SCHEMA_VERSION = "2";
+export const SCHEMA_VERSION = "3";
 
 // v2: nickname + password accounts; Telegram is linked optionally (DMs, admin rights).
 export const MIGRATION_V2 = [
@@ -14,6 +14,28 @@ export const MIGRATION_V2 = [
   `CREATE UNIQUE INDEX IF NOT EXISTS portal_users_tg ON portal_users(tg_id)`,
   `CREATE TABLE IF NOT EXISTS portal_links(token_hash TEXT PRIMARY KEY,user_id TEXT NOT NULL,tg_user TEXT,created INTEGER NOT NULL,expires INTEGER NOT NULL)`,
 ];
+
+// v3: news broadcast to Telegram and browser push notifications.
+export const MIGRATION_V3 = [
+  `ALTER TABLE portal_users ADD COLUMN notify_news INTEGER NOT NULL DEFAULT 1`,
+  `ALTER TABLE portal_posts ADD COLUMN recipients INTEGER NOT NULL DEFAULT 0`,
+  `CREATE TABLE IF NOT EXISTS portal_push(id INTEGER PRIMARY KEY AUTOINCREMENT,user_id TEXT NOT NULL,endpoint TEXT NOT NULL UNIQUE,p256dh TEXT NOT NULL,auth TEXT NOT NULL,ua TEXT,created INTEGER NOT NULL)`,
+  `CREATE INDEX IF NOT EXISTS portal_push_user ON portal_push(user_id)`,
+  `CREATE TABLE IF NOT EXISTS portal_outbox(id INTEGER PRIMARY KEY AUTOINCREMENT,channel TEXT NOT NULL,target TEXT NOT NULL,payload TEXT NOT NULL,attempts INTEGER NOT NULL DEFAULT 0,claimed INTEGER NOT NULL DEFAULT 0,created INTEGER NOT NULL)`,
+];
+
+/** Runs statements, skipping ADD COLUMN for columns that already exist (idempotent). */
+async function applyMigration(e, stmts) {
+  const colsCache = {};
+  for (const sql of stmts) {
+    const m = sql.match(/^ALTER TABLE (\w+) ADD COLUMN (\w+)/);
+    if (m) {
+      colsCache[m[1]] ||= new Set(((await e.DB.prepare(`PRAGMA table_info(${m[1]})`).all()).results || []).map((c) => c.name));
+      if (colsCache[m[1]].has(m[2])) continue;
+    }
+    await e.DB.prepare(sql).run();
+  }
+}
 
 export const SCHEMA = [
   `CREATE TABLE IF NOT EXISTS portal_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)`,
@@ -62,11 +84,8 @@ export async function ensureSchema(e) {
       /* table missing — create below */
     }
     if (version < "1") await e.DB.batch(SCHEMA.map((sql) => e.DB.prepare(sql)));
-    if (version < "2") {
-      const cols = new Set(((await e.DB.prepare("PRAGMA table_info(portal_users)").all()).results || []).map((c) => c.name));
-      const stmts = MIGRATION_V2.filter((sql) => !/ADD COLUMN (\w+)/.test(sql) || !cols.has(sql.match(/ADD COLUMN (\w+)/)[1]));
-      for (const sql of stmts) await e.DB.prepare(sql).run();
-    }
+    if (version < "2") await applyMigration(e, MIGRATION_V2);
+    if (version < "3") await applyMigration(e, MIGRATION_V3);
     await e.DB.prepare(
       "INSERT INTO portal_settings(key,value) VALUES('schema_version',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
     ).bind(SCHEMA_VERSION).run();

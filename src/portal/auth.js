@@ -85,7 +85,7 @@ export async function loadSession(req, e) {
   if (!token || !/^[a-f0-9]{64}$/.test(token)) return null;
   const hash = await sha256(token);
   const row = await e.DB.prepare(
-    `SELECT s.hash,s.user_id,s.csrf,s.expires,s.seen,u.nick,u.first_name,u.last_name,u.username,u.photo_url,u.notify_tg,u.tg_blocked,u.tg_id,u.active_device,u.banned,u.deleted,u.created
+    `SELECT s.hash,s.user_id,s.csrf,s.expires,s.seen,u.nick,u.first_name,u.last_name,u.username,u.photo_url,u.notify_tg,u.notify_news,u.tg_blocked,u.tg_id,u.active_device,u.banned,u.deleted,u.created
      FROM portal_sessions s JOIN portal_users u ON u.id=s.user_id WHERE s.hash=?`,
   ).bind(hash).first();
   const t = now();
@@ -104,6 +104,7 @@ export async function loadSession(req, e) {
     username: row.username,
     photo_url: row.photo_url,
     notify_tg: !!row.notify_tg,
+    notify_news: row.notify_news !== 0,
     tg_blocked: !!row.tg_blocked,
     tg_linked: !!row.tg_id,
     active_device: row.active_device,

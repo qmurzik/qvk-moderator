@@ -6,12 +6,39 @@ import { botUsername } from "./telegram.js";
 import { upload } from "./files.js";
 import * as T from "./tickets.js";
 import { mcpStatus, createMcpKey, revokeMcpKey } from "./mcp.js";
+import { broadcastPost, drainOutbox } from "./broadcast.js";
+import { vapidKeys } from "./push.js";
+
+// Only real Web Push services (prevents using the Worker to POST to arbitrary hosts).
+const PUSH_HOSTS = /^(fcm\.googleapis\.com|android\.googleapis\.com|updates\.push\.services\.mozilla\.com|push\.services\.mozilla\.com|[a-z0-9.-]+\.push\.apple\.com|[a-z0-9.-]+\.notify\.windows\.com|[a-z0-9.-]+\.push\.yandex\.(ru|net))$/i;
+
+async function savePushSubscription(req, e, ses, b) {
+  const endpoint = String(b.endpoint || "");
+  let host = "";
+  try {
+    const u = new URL(endpoint);
+    if (u.protocol === "https:") host = u.hostname;
+  } catch {
+    /* invalid */
+  }
+  if (!host || !PUSH_HOSTS.test(host) || endpoint.length > 1000) fail(400, "Этот браузер не поддерживается для пуш-уведомлений");
+  const p256dh = String(b.keys?.p256dh || ""), auth = String(b.keys?.auth || "");
+  if (!/^[A-Za-z0-9_-]{86,88}$/.test(p256dh) || !/^[A-Za-z0-9_-]{21,24}$/.test(auth)) fail(400, "Некорректная подписка");
+  const n = await e.DB.prepare("SELECT COUNT(*) n FROM portal_push WHERE user_id=?").bind(ses.user.id).first();
+  if (n.n >= 10) await e.DB.prepare("DELETE FROM portal_push WHERE id=(SELECT id FROM portal_push WHERE user_id=? ORDER BY id LIMIT 1)").bind(ses.user.id).run();
+  await e.DB.prepare(
+    `INSERT INTO portal_push(user_id,endpoint,p256dh,auth,ua,created) VALUES(?,?,?,?,?,?)
+     ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth,ua=excluded.ua`,
+  ).bind(ses.user.id, endpoint, p256dh, auth, String(req.headers.get("user-agent") || "").slice(0, 160), now()).run();
+  return { ok: true };
+}
 
 // ---------- profile & devices ----------
 
 async function me(e, ses) {
   const devices = (await e.DB.prepare("SELECT id,model,android,app_version,firmware,updated FROM portal_devices WHERE user_id=? ORDER BY id").bind(ses.user.id).all()).results || [];
   const unread = await e.DB.prepare("SELECT COUNT(*) n FROM portal_notifications WHERE user_id=? AND read=0").bind(ses.user.id).first();
+  const pushCount = await e.DB.prepare("SELECT COUNT(*) n FROM portal_push WHERE user_id=?").bind(ses.user.id).first();
   const settings = {
     current_version: await getSetting(e, "current_version", "3.0"),
     comments_public: (await getSetting(e, "comments_public", "on")) === "on",
@@ -22,7 +49,7 @@ async function me(e, ses) {
   }
   const active = devices.find((d) => d.id === ses.user.active_device) ? ses.user.active_device : devices[0]?.id ?? null;
   return {
-    user: { ...ses.user, name: displayName(ses.user), active_device: active },
+    user: { ...ses.user, name: displayName(ses.user), active_device: active, push_count: pushCount?.n || 0 },
     is_admin: ses.isAdmin,
     csrf: ses.session.csrf,
     devices,
@@ -145,7 +172,7 @@ export async function adminSettings(e, body) {
   return { ok: true };
 }
 
-export async function savePost(e, ses, id, body) {
+export async function savePost(e, ses, id, body, ctx = null) {
   const kind = oneOf(body.kind, ["announce", "changelog"], "announce");
   const title = clean(body.title, 140, { multiline: false });
   const text = clean(body.body, LIMITS.postBody);
@@ -155,7 +182,14 @@ export async function savePost(e, ses, id, body) {
     const r = await e.DB.prepare("UPDATE portal_posts SET kind=?,title=?,body=?,version=?,pinned=? WHERE id=?").bind(kind, title, text, version, body.pinned ? 1 : 0, Number(id)).run();
     if (!r.meta?.changes) fail(404, "Запись не найдена");
   } else {
-    await e.DB.prepare("INSERT INTO portal_posts(kind,title,body,version,pinned,author_id,created) VALUES(?,?,?,?,?,?,?)").bind(kind, title, text, version, body.pinned ? 1 : 0, ses.user.id, now()).run();
+    const r = await e.DB.prepare("INSERT INTO portal_posts(kind,title,body,version,pinned,author_id,created) VALUES(?,?,?,?,?,?,?)").bind(kind, title, text, version, body.pinned ? 1 : 0, ses.user.id, now()).run();
+    await bump(e);
+    // New posts are sent to testers unless explicitly disabled.
+    if (body.notify !== false) {
+      const sent = await broadcastPost(e, ctx, { id: r.meta.last_row_id, kind, title, body: text, version });
+      return { ok: true, id: r.meta.last_row_id, sent };
+    }
+    return { ok: true, id: r.meta.last_row_id };
   }
   await bump(e);
   return { ok: true };
@@ -234,6 +268,7 @@ export async function handleApi(req, e, ctx, url) {
     if (method === "PATCH") {
       const b = await readJson(req);
       if (b.notify_tg !== undefined) await e.DB.prepare("UPDATE portal_users SET notify_tg=?,tg_blocked=CASE WHEN ? THEN 0 ELSE tg_blocked END WHERE id=?").bind(b.notify_tg ? 1 : 0, b.notify_tg ? 1 : 0, ses.user.id).run();
+      if (b.notify_news !== undefined) await e.DB.prepare("UPDATE portal_users SET notify_news=? WHERE id=?").bind(b.notify_news ? 1 : 0, ses.user.id).run();
       if (b.active_device !== undefined) {
         const d = await e.DB.prepare("SELECT id FROM portal_devices WHERE id=? AND user_id=?").bind(Number(b.active_device), ses.user.id).first();
         if (!d) fail(404, "Устройство не найдено");
@@ -242,6 +277,13 @@ export async function handleApi(req, e, ctx, url) {
       return json({ ok: true });
     }
     if (method === "DELETE") return deleteProfile(req, e, ses);
+  }
+  if (path === "/push/key" && method === "GET") return json({ publicKey: (await vapidKeys(e)).publicKey });
+  if (path === "/push/subscribe" && method === "POST") return json(await savePushSubscription(req, e, ses, await readJson(req, 4000)));
+  if (path === "/push/unsubscribe" && method === "POST") {
+    const b = await readJson(req, 4000);
+    await e.DB.prepare("DELETE FROM portal_push WHERE user_id=? AND endpoint=?").bind(ses.user.id, String(b.endpoint || "")).run();
+    return json({ ok: true });
   }
   if (path === "/me/password" && method === "POST") return changePassword(req, e, ses, await readJson(req, 4000));
   if (path === "/tg/link" && method === "POST") return startTelegramLink(req, e, ses);
@@ -257,6 +299,9 @@ export async function handleApi(req, e, ctx, url) {
   }
   if (path === "/pulse" && method === "GET") {
     const unread = await e.DB.prepare("SELECT COUNT(*) n FROM portal_notifications WHERE user_id=? AND read=0").bind(ses.user.id).first();
+    // Opportunistically continue a pending broadcast.
+    const pending = await e.DB.prepare("SELECT 1 x FROM portal_outbox WHERE claimed<? LIMIT 1").bind(now() - 120).first();
+    if (pending && ctx?.waitUntil) ctx.waitUntil(drainOutbox(e).catch(() => {}));
     return json({ rev: await getSetting(e, "rev", "1"), unread: unread?.n || 0 });
   }
   if (path === "/home" && method === "GET") return json(await T.homeData(e, ses));
@@ -281,7 +326,7 @@ export async function handleApi(req, e, ctx, url) {
   if (path === "/fixes" && method === "GET") return json(await T.fixHistory(e, ses));
   if (path === "/leaders" && method === "GET") return json(await T.leaders(e, ses));
   if (path === "/posts" && method === "GET") {
-    const rows = (await e.DB.prepare("SELECT id,kind,title,body,version,pinned,created FROM portal_posts ORDER BY pinned DESC,id DESC LIMIT 100").all()).results || [];
+    const rows = (await e.DB.prepare("SELECT id,kind,title,body,version,pinned,created,recipients FROM portal_posts ORDER BY pinned DESC,id DESC LIMIT 100").all()).results || [];
     return json({ items: rows });
   }
   if (path === "/notifications" && method === "GET") {
@@ -343,7 +388,7 @@ export async function handleApi(req, e, ctx, url) {
       if (b.banned) await e.DB.prepare("DELETE FROM portal_sessions WHERE user_id=?").bind(seg[2]).run();
       return json({ ok: true });
     }
-    if (seg[1] === "posts" && method === "POST" && !seg[2]) return json(await savePost(e, ses, null, await readJson(req)));
+    if (seg[1] === "posts" && method === "POST" && !seg[2]) return json(await savePost(e, ses, null, await readJson(req), ctx));
     if (seg[1] === "posts" && method === "PUT" && seg[2]) return json(await savePost(e, ses, seg[2], await readJson(req)));
     if (seg[1] === "posts" && method === "DELETE" && seg[2]) {
       await e.DB.prepare("DELETE FROM portal_posts WHERE id=?").bind(Number(seg[2])).run();

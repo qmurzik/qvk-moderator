@@ -310,7 +310,7 @@ const TOOLS = [
   {
     name: "publish_post",
     title: "Опубликовать объявление",
-    description: "Создать или изменить (если указан id) объявление или список изменений. Появится на главной и на странице «Обновления».",
+    description: "Создать или изменить (если указан id) объявление или список изменений. Появится на главной и на странице «Обновления». Новая запись автоматически рассылается тестировщикам: в Telegram (у кого привязан) и браузерными пуш-уведомлениями (notify=false — без рассылки). Перед рассылкой покажите текст пользователю.",
     annotations: { destructiveHint: false },
     inputSchema: {
       type: "object",
@@ -321,10 +321,11 @@ const TOOLS = [
         body: S({ description: "Текст; переносы строк сохраняются, ссылки и BUG-/IDEA-номера становятся кликабельными" }),
         version: S({}),
         pinned: { type: "boolean" },
+        notify: { type: "boolean", description: "Разослать тестировщикам (по умолчанию true для новых записей)" },
       },
       required: ["title"],
     },
-    run: async (e, ses, ctx, a, api) => api.savePost(e, ses, a.id || null, a),
+    run: async (e, ses, ctx, a, api) => api.savePost(e, ses, a.id || null, a, ctx),
   },
   {
     name: "delete_post",
