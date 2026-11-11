@@ -427,7 +427,10 @@ test("portal: MCP connector gives Claude admin access as «Команда QVK»"
     });
   const list = await call2("list_tickets", { kind: "bug", status: "new" }, true);
   assert.equal(list.data.total, 2);
-  const t = await call2("get_ticket", { code: "BUG-0001" });
+  const gt = (await rpc("/mcp/" + key, { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "get_ticket", arguments: { code: "BUG-0001" } } })).data.result;
+  assert.ok(gt.content.some((c) => c.type === "image" && c.mimeType === "image/png"), "get_ticket attaches screenshots");
+  assert.ok(gt.content.some((c) => c.type === "text" && c.text.includes("FATAL crash in Player")), "get_ticket attaches log tail");
+  const t = { data: JSON.parse(gt.content[0].text) };
   assert.equal(t.data.device.model, "Pixel 9");
   assert.equal(t.data.attachments.length, 3);
   // Attachments are viewable through the connector.

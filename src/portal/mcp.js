@@ -16,6 +16,11 @@ export const CLAUDE_ID = "claude";
 /** Name testers see on everything done through the connector. */
 export const TEAM_NAME = "Команда QVK";
 const PROTOCOLS = ["2025-06-18", "2025-03-26", "2024-11-05"];
+function toBase64(bytes) {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+}
 const iso = (s) => (s ? new Date(s * 1000).toISOString() : null);
 
 // ---------- key management (called from the admin API) ----------
@@ -140,10 +145,33 @@ const TOOLS = [
   {
     name: "get_ticket",
     title: "Открыть обращение",
-    description: "Полные данные обращения: описание, шаги, устройство и Android автора, вложения (id для get_attachment), обсуждение и история статусов.",
+    description: "Полные данные обращения: описание, шаги, устройство и Android автора, обсуждение и история статусов. Скриншоты из обращения и комментариев прикладываются к ответу изображениями, у текстовых логов — последние строки; остальное — через get_attachment.",
     annotations: { readOnlyHint: true },
     inputSchema: { type: "object", properties: { code: CODE }, required: ["code"] },
-    run: async (e, ses, ctx, a) => full(await T.ticketDetail(e, ses, String(a.code).toUpperCase())),
+    run: async (e, ses, ctx, a) => {
+      const t = await T.ticketDetail(e, ses, String(a.code).toUpperCase());
+      const data = full(t);
+      const all = [...t.attachments.map((x) => ({ ...x, where: "обращение" })), ...t.comment_list.filter((c) => !c.deleted).flatMap((c) => c.attachments.map((x) => ({ ...x, where: "комментарий " + c.author.name })))];
+      const extra = [];
+      let budget = 6 * 1024 * 1024;
+      let images = 0;
+      const skipped = [];
+      for (const x of all) {
+        const att = await e.DB.prepare("SELECT * FROM portal_attachments WHERE id=?").bind(x.id).first();
+        if (!att) continue;
+        if (att.mime.startsWith("image/")) {
+          if (images >= 10 || att.size > budget || att.size > 4.5 * 1024 * 1024) { skipped.push(att.name); continue; }
+          extra.push({ type: "text", text: `Изображение «${att.name}» (${x.where}, id ${att.id}):` }, { type: "image", data: toBase64(await readAttachment(e, att)), mimeType: att.mime });
+          budget -= att.size;
+          images++;
+        } else if (att.mime === "text/plain") {
+          const txt = new TextDecoder().decode(await readAttachment(e, att));
+          extra.push({ type: "text", text: `Лог «${att.name}» (${x.where}, id ${att.id}), последние ${Math.min(txt.length, 6000)} из ${txt.length} символов:\n` + txt.slice(-6000) });
+        }
+      }
+      if (skipped.length) data.not_shown = "Не приложены (лимит размера/количества): " + skipped.join(", ") + ". Откройте через get_attachment.";
+      return { __content: [{ type: "text", text: JSON.stringify(data) }, ...extra] };
+    },
   },
   {
     name: "get_attachment",
@@ -175,10 +203,7 @@ const TOOLS = [
       };
       if (att.mime.startsWith("image/")) {
         if (att.size > 4.5 * 1024 * 1024) return { ...meta, note: "Изображение больше 4,5 МБ — его нельзя передать для просмотра. Попросите администратора открыть его на сайте." };
-        const bytes = await readAttachment(e, att);
-        let bin = "";
-        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-        return { __content: [{ type: "text", text: JSON.stringify(meta) }, { type: "image", data: btoa(bin), mimeType: att.mime }] };
+        return { __content: [{ type: "text", text: JSON.stringify(meta) }, { type: "image", data: toBase64(await readAttachment(e, att)), mimeType: att.mime }] };
       }
       if (att.mime === "text/plain") return textOut(await readAttachment(e, att), att.name);
       if (att.mime === "application/zip") {
