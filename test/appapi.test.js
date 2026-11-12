@@ -323,6 +323,47 @@ test("app api: create, list, card, similar, comments, me-too, verify, notificati
   isErr(await AdminApp.send("POST", "/tickets/BUG-0001/verify", { result: "fixed" }), 403);
 });
 
+test("app api: logs request reaches the app as a logs_request notification", async () => {
+  const env = makeEnv();
+  const admin = await webUser(env, "boss", ADMIN);
+  const W = await webUser(env, "author", 444);
+  const A = await appFor(env, W);
+  const other = await webUser(env, "stranger");
+  await A.send("POST", "/tickets", BUG);
+  assert.equal((await W.get("/api/p/me")).data.user.app_connected, true);
+
+  // 1) Team button in the admin panel (web endpoint).
+  sent.length = 0;
+  const r = await admin.send("POST", "/api/p/tickets/BUG-0001/request-logs", { text: "Пришлите журнал после повторения бага" });
+  assert.equal(r.status, 200);
+  assert.deepEqual([r.data.app_connected, r.data.already_pending], [true, false]);
+  let n = (await A.get("/notifications?unread=1")).data.items.find((x) => x.type === "logs_request");
+  assert.deepEqual([n.type, n.ticket, n.text], ["logs_request", "BUG-0001", "Пришлите журнал после повторения бага"]);
+  assert.ok(sent.some((m) => m.body.chat_id === "444" && /журнал/.test(m.body.text)), "author also told in Telegram");
+  assert.ok((await A.get("/tickets/BUG-0001")).data.ticket.history.some((h) => h.field === "logs_request" && h.to === "team"));
+  // Repeated request while unread → no duplicate.
+  assert.equal((await admin.send("POST", "/api/p/tickets/BUG-0001/request-logs", {})).data.already_pending, true);
+  assert.equal((await A.get("/notifications?unread=1")).data.items.filter((x) => x.type === "logs_request").length, 1);
+  // Only the team can request (author/stranger via the web endpoint → 403).
+  assert.equal((await other.send("POST", "/api/p/tickets/BUG-0001/request-logs", {})).status, 403);
+  assert.equal((await W.send("POST", "/api/p/tickets/BUG-0001/request-logs", {})).status, 403);
+  // The app answers with a comment + log; marks the notification read.
+  const log = await A.upload([["qvk-log.txt", LOG, "text/plain"]]);
+  await A.send("POST", "/tickets/BUG-0001/comments", { text: "Журнал приложения по запросу команды", attachments: [log.data.attachments[0].id] });
+  await A.send("POST", "/notifications/read", { ids: [n.id] });
+  assert.equal((await A.get("/notifications?unread=1")).data.items.filter((x) => x.type === "logs_request").length, 0);
+
+  // 2) Author's checkbox in the web form.
+  await W.send("POST", "/api/p/devices", { model: "Poco", android: "16", app_version: "alpha32" });
+  const dev = (await W.get("/api/p/me")).data.devices[0].id;
+  const c = await W.send("POST", "/api/p/tickets", { ...BUG, device: undefined, device_id: dev, request_logs: true });
+  n = (await A.get("/notifications?unread=1")).data.items.find((x) => x.type === "logs_request" && x.ticket === c.data.code);
+  assert.match(n.text, new RegExp("журнал.*" + c.data.code));
+  // Without the checkbox — nothing.
+  const c2 = await W.send("POST", "/api/p/tickets", { ...BUG, title: "Ещё одна ошибка плеера", device: undefined, device_id: dev });
+  assert.ok(!(await A.get("/notifications?unread=1")).data.items.some((x) => x.ticket === c2.data.code));
+});
+
 test("app api: rate limits — 10 tickets and 30 comments per hour with Retry-After", async () => {
   const env = makeEnv();
   const A = await appFor(env, await webUser(env, "spammer"));

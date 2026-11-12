@@ -489,6 +489,11 @@ test("portal: MCP connector gives Claude admin access as «Команда QVK»"
   assert.ok(notes.some((n) => n.type === "comment") && notes.some((n) => n.type === "status"));
   assert.ok(sent.some((m) => m.method === "sendMessage" && m.body.chat_id === "777"), "tester DM via bot");
   assert.ok(!JSON.stringify(view).includes("Claude"), "no Claude mention for testers");
+  // request_logs → logs_request notification for the author.
+  const reqLogs = await call2("request_logs", { code: "BUG-0001" });
+  assert.equal(reqLogs.data.ok, true);
+  const ln = (await A.get("/api/p/notifications")).data.items.find((n) => n.type === "logs_request");
+  assert.equal(ln.code, "BUG-0001");
   // Merge, posts, settings, overview, testers.
   assert.equal((await call2("merge_duplicate", { source: "BUG-0002", target: "BUG-0001" })).data.ok, true);
   await call2("publish_post", { kind: "changelog", title: "Сборка 3.0.3", body: "Исправлен плеер", version: "3.0.3" });

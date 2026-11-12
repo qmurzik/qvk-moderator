@@ -40,6 +40,7 @@ async function me(e, ses) {
   const devices = (await e.DB.prepare("SELECT id,model,android,app_version,firmware,updated FROM portal_devices WHERE user_id=? ORDER BY id").bind(ses.user.id).all()).results || [];
   const unread = await e.DB.prepare("SELECT COUNT(*) n FROM portal_notifications WHERE user_id=? AND read=0").bind(ses.user.id).first();
   const pushCount = await e.DB.prepare("SELECT COUNT(*) n FROM portal_push WHERE user_id=?").bind(ses.user.id).first();
+  const appCount = await e.DB.prepare("SELECT COUNT(*) n FROM portal_app_tokens WHERE user_id=? AND revoked=0 AND last_used>?").bind(ses.user.id, now() - 180 * 86400).first();
   const settings = {
     current_version: await getSetting(e, "current_version", "3.0"),
     comments_public: (await getSetting(e, "comments_public", "on")) === "on",
@@ -50,7 +51,7 @@ async function me(e, ses) {
   }
   const active = devices.find((d) => d.id === ses.user.active_device) ? ses.user.active_device : devices[0]?.id ?? null;
   return {
-    user: { ...ses.user, name: displayName(ses.user), active_device: active, push_count: pushCount?.n || 0 },
+    user: { ...ses.user, name: displayName(ses.user), active_device: active, push_count: pushCount?.n || 0, app_connected: (appCount?.n || 0) > 0 },
     is_admin: ses.isAdmin,
     csrf: ses.session.csrf,
     devices,
@@ -331,6 +332,7 @@ export async function handleApi(req, e, ctx, url) {
     if (action === "confirm" && method === "POST") return json(await T.confirmBug(e, ses, code, await readJson(req)));
     if (action === "favorite" && method === "POST") return json(await T.favorite(e, ses, code, await readJson(req)));
     if (action === "verify" && method === "POST") return json(await T.verifyFix(e, ctx, ses, code, await readJson(req)));
+    if (action === "request-logs" && method === "POST") return json(await T.requestLogs(e, ctx, ses, code, { text: (await readJson(req)).text }));
     if (action === "admin" && method === "POST") return json(await T.adminUpdate(e, ctx, ses, code, await readJson(req)));
   }
   if (seg[0] === "comments" && seg[1] && method === "DELETE") return json(await T.deleteComment(e, ses, seg[1]));

@@ -147,7 +147,7 @@
   "can": { "comment": true, "verify": true, "me_too": false },
   "web_url": "https://…/bugs/BUG-0016" } }
 ```
-`comments[].kind`: `comment`, `addendum` (дополнение автора), `verify` (результат проверки). `history[].field`: `created`, `status`, `priority`, `fixed_version`, `note`, `edited`, `merged`, `pinned`, `hidden`. Ошибки: 404 `not_found` (нет или скрыто администрацией).
+`comments[].kind`: `comment`, `addendum` (дополнение автора), `verify` (результат проверки). `history[].field`: `created`, `status`, `priority`, `fixed_version`, `note`, `edited`, `merged`, `pinned`, `hidden`, `logs_request` (`to`: `team` или `author`). Ошибки: 404 `not_found` (нет или скрыто администрацией).
 
 ### `POST /tickets/{code}/comments`
 Запрос: `{ "text": "…", "attachments": ["…"], "addendum": false }` — `addendum: true` (только автор) помечает комментарий как дополнение к отчёту. Нужен текст или хотя бы одно вложение. Можно комментировать своё и чужое обращение (если администрация не ограничила комментарии автором).
@@ -167,7 +167,13 @@
 ```json
 { "items": [ { "id": 41, "type": "verify", "text": "🔵 Проверьте исправление BUG-0016 в версии alpha23…", "ticket": "BUG-0016", "read": false, "created": "…" } ] }
 ```
-`type`: `status`, `comment`, `need_info`, `verify`, `fixed`, `implemented`, `news`. `POST /notifications/read` с `{ "ids": [41, 42] }` или `{}` (все).
+`type`: `status`, `comment`, `need_info`, `verify`, `fixed`, `implemented`, `news`, `logs_request`. `POST /notifications/read` с `{ "ids": [41, 42] }` или `{}` (все).
+
+**`logs_request`** — просьба выгрузить журнал приложения по обращению `ticket`:
+```json
+{ "id": 57, "type": "logs_request", "text": "Пришлите журнал по BUG-0029 после повторения бага", "ticket": "BUG-0029", "read": false, "created": "…" }
+```
+Создаётся, когда команда нажала «Запросить журнал» в админке (или вызвала `request_logs` в коннекторе), либо когда автор отметил «Выгрузить журнал из приложения» в веб-форме. Пока такое уведомление не прочитано, повторный запрос не создаёт дубликат. Ожидаемый ответ приложения: `POST /attachments` (лог) → `POST /tickets/{code}/comments` с текстом «Журнал приложения по запросу команды» → `POST /notifications/read` с id уведомления.
 
 ## Коды
 

@@ -5,6 +5,8 @@ import {
 } from "./constants.js";
 import { now, fail, clean, oneOf, likeEscape, getSetting, bump, rateLimit, displayName } from "./util.js";
 import { notify, notifyAdmins } from "./notify.js";
+import { queuePushForUser, drainOutbox } from "./broadcast.js";
+import { tg, escapeTgHtml } from "./telegram.js";
 import { linkAttachments } from "./files.js";
 
 export const CODE_RE = /^(BUG|IDEA)-(\d{1,7})$/;
@@ -284,6 +286,7 @@ export async function createTicket(e, ctx, ses, body, opts = {}) {
   ]);
   await linkAttachments(e, ses.user.id, body.attachments, id);
   await bump(e);
+  if (body.request_logs === true && opts.source !== "app") await requestLogs(e, ctx, ses, code, { byAuthor: true });
   await notifyAdmins(e, ctx, ses.user.id, { id, code, kind }, (kind === "bug" ? "🐛 Новый баг " : "💡 Новое предложение ") + code + (opts.source === "app" ? " · 📱 из приложения" : "") + "\n" + f.title + "\nАвтор: " + displayName(ses.user));
   return { ok: true, code };
 }
@@ -390,6 +393,42 @@ export async function deleteComment(e, ses, id) {
 }
 
 // ---------- verification by author ----------
+
+// ---------- logs request (picked up by the QVK app via /api/app/v1/notifications) ----------
+
+/**
+ * Asks the ticket author's QVK app to upload its log. Creates a "logs_request" notification
+ * for the author (the app polls unread notifications) and a history entry.
+ * Allowed for admins, and for the author when submitting the report.
+ */
+export async function requestLogs(e, ctx, ses, code, { byAuthor = false, text = "" } = {}) {
+  const r = await loadTicket(e, ses, code);
+  const isAuthor = r.author_id === ses.user.id;
+  if (!ses.isAdmin && !(byAuthor && isAuthor)) fail(403, "Запросить журнал может только команда");
+  const msg = clean(text, 300) || (byAuthor ? `Выгрузите журнал приложения по обращению ${r.code}` : `Пришлите журнал по ${r.code} после повторения бага`);
+  const t = now();
+  const pending = await e.DB.prepare("SELECT id FROM portal_notifications WHERE user_id=? AND ticket_id=? AND type='logs_request' AND read=0").bind(r.author_id, r.id).first();
+  if (!pending) {
+    await e.DB.prepare("INSERT INTO portal_notifications(user_id,ticket_id,type,text,created) VALUES(?,?,?,?,?)").bind(r.author_id, r.id, "logs_request", msg, t).run();
+  }
+  await e.DB.prepare("INSERT INTO portal_history(ticket_id,actor_id,field,old,new,note,created) VALUES(?,?,?,?,?,?,?)").bind(r.id, ses.user.id, "logs_request", null, byAuthor ? "author" : "team", byAuthor ? null : msg, t).run();
+  await e.DB.prepare("UPDATE portal_tickets SET activity=? WHERE id=?").bind(t, r.id).run();
+  const app = await e.DB.prepare("SELECT COUNT(*) n FROM portal_app_tokens WHERE user_id=? AND revoked=0 AND last_used>?").bind(r.author_id, t - 180 * 86400).first();
+  // A team request also reaches the author in Telegram/push, so it isn't missed without the app.
+  if (!byAuthor) {
+    const u = await e.DB.prepare("SELECT tg_id,notify_tg,tg_blocked FROM portal_users WHERE id=?").bind(r.author_id).first();
+    await queuePushForUser(e, r.author_id, { title: "QVK Beta · " + r.code, body: msg, url: "/" + (r.kind === "bug" ? "bugs" : "ideas") + "/" + r.code, tag: r.code });
+    const jobs = [drainOutbox(e).catch(() => {})];
+    if (u?.tg_id && u.notify_tg && !u.tg_blocked) {
+      jobs.push(tg(e, "sendMessage", { chat_id: u.tg_id, parse_mode: "HTML", text: "📄 <b>QVK Beta Portal</b>\n" + escapeTgHtml(msg) + (app.n ? "\n\nОткройте QVK — приложение предложит выгрузить журнал." : "\n\nПриложите журнал к обращению на сайте или подключите приложение QVK в профиле.") }).catch(() => {}));
+    }
+    const job = Promise.all(jobs);
+    if (ctx?.waitUntil) ctx.waitUntil(job);
+    else await job;
+  }
+  await bump(e);
+  return { ok: true, already_pending: !!pending, app_connected: app.n > 0 };
+}
 
 export async function verifyFix(e, ctx, ses, code, body) {
   const r = await loadTicket(e, ses, code);

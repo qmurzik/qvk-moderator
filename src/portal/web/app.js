@@ -813,7 +813,8 @@
         body = html`<div style="font-weight:650;margin-bottom:8px">Устройство</div>
           <div class="devpick">${S.me.devices.map(devCard)}</div>
           <a class="btn ghost sm mt" href="/profile">${I("plus", "s")}Добавить или изменить устройство</a>
-          <div style="font-weight:650;margin:22px 0 8px">Скриншоты, видео и другие вложения</div><div id="up"></div>`;
+          <div style="font-weight:650;margin:22px 0 8px">Скриншоты, видео и другие вложения</div><div id="up"></div>
+          ${S.me.user.app_connected ? html`<label class="switch mt"><input type="checkbox" id="rlogs" ${d.request_logs ? "checked" : ""}><span class="t">Выгрузить журнал из приложения<small>При следующем открытии QVK предложит приложить журнал к этому отчёту</small></span></label>` : html`<p class="faint" style="font-size:13px;margin-top:14px">${I("phone", "s")} Подключите приложение QVK в профиле — тогда журнал можно будет выгрузить прямо из него.</p>`}`;
       } else if (s === "idea") {
         body = html`<div class="stack">${field("description", "Описание идеи", { area: true, rows: 5, ph: "В чём суть предложения?" })}${field("how_it_works", "Как это должно работать", { area: true, rows: 4, ph: "Опишите сценарий: что видит и делает пользователь" })}${field("purpose", "Для чего это нужно", { area: true, rows: 3, max: 2000, ph: "Какую проблему решает, кому будет полезно" })}</div>`;
       } else if (s === "media") {
@@ -836,6 +837,7 @@
       $$("[data-freq]", form).forEach((b) => (b.onclick = () => { d.frequency = b.dataset.freq; save(); $$("[data-freq]", form).forEach((x) => x.classList.toggle("on", x === b)); }));
       $$("[data-dev]", form).forEach((b) => (b.onclick = () => { d.device_id = Number(b.dataset.dev); save(); render(); }));
       if ($("#up", view)) up = uploader($("#up", view), d.attachments, save);
+      if ($("#rlogs", view)) $("#rlogs", view).onchange = (ev) => { d.request_logs = ev.target.checked; save(); };
       if ($("#reset", view)) $("#reset", view).onclick = () => { d = blank(); step = 0; restored = false; clearDraft(); render(); };
       if ($("#prev", view)) $("#prev", view).onclick = () => { step--; save(); render(); window.scrollTo(0, 0); };
       form.onsubmit = async (e) => {
@@ -850,7 +852,7 @@
         const btn = $("#next", view);
         btn.disabled = true; set(btn, html`<span class="spin"></span>Отправка…`);
         try {
-          const r = await POST("/tickets", { kind, category: d.category, title: d.title, description: d.description, steps: d.steps, expected: d.expected, actual: d.actual, frequency: d.frequency, how_it_works: d.how_it_works, purpose: d.purpose, device_id: d.device_id, attachments: d.attachments.map((a) => a.id) });
+          const r = await POST("/tickets", { kind, category: d.category, title: d.title, description: d.description, steps: d.steps, expected: d.expected, actual: d.actual, frequency: d.frequency, how_it_works: d.how_it_works, purpose: d.purpose, device_id: d.device_id, attachments: d.attachments.map((a) => a.id), request_logs: isBug && !!d.request_logs && !!S.me.user.app_connected });
           clearDraft();
           success(r.code);
         } catch (err2) {
@@ -959,6 +961,7 @@
         if (ev.h) {
           const h = ev.h;
           if (h.field === "created") return html`<div class="hist">${I("sparkles", "s")}<span><b>${h.actor}</b> создал${""} обращение</span><span class="faint">${rel(h.created)}</span></div>`;
+          if (h.field === "logs_request") return html`<div class="hist">${I("file", "s")}<span>${h.new === "author" ? html`<b>${h.actor}</b> попросил приложение выгрузить журнал` : html`<b>${h.actor}</b> запросил журнал приложения`}</span><span class="faint">${rel(h.created)}</span>${h.note ? html`<span class="note-h">${h.note}</span>` : ""}</div>`;
           if (h.field === "edited") return html`<div class="hist">${I("edit", "s")}<span><b>${h.actor}</b> отредактировал отчёт</span><span class="faint">${rel(h.created)}</span></div>`;
           if (h.field === "note") return html`<div class="hist">${I("shield", "s")}<span><b>${h.actor}</b> оставил пояснение</span><span class="faint">${rel(h.created)}</span>${h.note ? html`<span class="note-h">${h.note}</span>` : ""}</div>`;
           if (h.field === "merged") return html`<div class="hist">${I("merge", "s")}<span>${h.note}</span><span class="faint">${rel(h.created)}</span></div>`;
@@ -1014,7 +1017,7 @@
         <label class="switch" style="padding:4px 0"><input type="checkbox" name="pinned" ${t.pinned ? "checked" : ""}><span class="t">Закрепить</span></label>
         <label class="switch" style="padding:4px 0"><input type="checkbox" name="hidden" ${t.hidden ? "checked" : ""}><span class="t">Скрыть от тестировщиков</span></label>
         <button class="btn primary block">${I("check")}Сохранить</button>
-        <div class="row wrap">${isBug ? html`<button type="button" class="btn sm ok" data-quick="fixed">${I("check", "s")}Исправлено</button><button type="button" class="btn sm" data-quick="verify">${I("refresh", "s")}На проверку</button><button type="button" class="btn sm" data-quick="need_info">Нужны данные</button>` : html`<button type="button" class="btn sm ok" data-quick="done">${I("check", "s")}Реализовано</button><button type="button" class="btn sm danger" data-quick="rejected">Отклонить</button>`}</div>
+        <div class="row wrap">${isBug ? html`<button type="button" class="btn sm ok" data-quick="fixed">${I("check", "s")}Исправлено</button><button type="button" class="btn sm" data-quick="verify">${I("refresh", "s")}На проверку</button><button type="button" class="btn sm" data-quick="need_info">Нужны данные</button><button type="button" class="btn sm" id="reqlogs">${I("file", "s")}Запросить журнал</button>` : html`<button type="button" class="btn sm ok" data-quick="done">${I("check", "s")}Реализовано</button><button type="button" class="btn sm danger" data-quick="rejected">Отклонить</button>`}</div>
         <div class="hr" style="margin:4px 0"></div>
         <label class="f">Объединить как дубликат <small>это обращение станет дубликатом указанного</small><div class="row"><input name="target" placeholder="${isBug ? "BUG-0001" : "IDEA-0001"}" style="text-transform:uppercase"><button type="button" class="btn" id="merge">${I("merge", "s")}</button></div></label>
       </form></div>`);
@@ -1027,6 +1030,20 @@
       };
       form.onsubmit = (e) => { e.preventDefault(); const f = readForm(form); delete f.target; save(f); };
       $$("[data-quick]", form).forEach((b) => (b.onclick = () => { const f = readForm(form); delete f.target; f.status = b.dataset.quick; save(f); }));
+      if ($("#reqlogs", form)) $("#reqlogs", form).onclick = () => sheet("Запросить журнал · " + t.code, (b, close) => {
+        set(b, html`<form class="stack" id="rlf"><p class="muted" style="margin:0">Автор получит просьбу в приложении QVK (оно предложит выгрузить журнал при следующем открытии), а также в Telegram и пуш-уведомлением.</p>
+          <label class="f">Текст просьбы<textarea name="text" rows="2" maxlength="300">Пришлите журнал по ${t.code} после повторения бага</textarea></label>
+          <button class="btn primary block">${I("send")}Запросить</button></form>`);
+        $("#rlf", b).onsubmit = async (ev) => {
+          ev.preventDefault();
+          try {
+            const r = await POST(`/tickets/${t.code}/request-logs`, { text: ev.target.text.value });
+            close();
+            toast(r.already_pending ? "Запрос уже ждёт ответа автора" : r.app_connected ? "Журнал запрошен — приложение автора спросит при открытии" : "Запрос отправлен. У автора не подключено приложение — придёт уведомление в Telegram/на сайте");
+            await reload();
+          } catch (err) { fail(err); }
+        };
+      });
       $("#merge", form).onclick = async () => {
         const target = form.target.value.trim().toUpperCase();
         if (!target) return toast("Укажите номер основного обращения", "err");
@@ -1145,7 +1162,7 @@
     set(view, skPage());
     const load = async () => {
       const r = await GET("/notifications");
-      const ic = { status: "refresh", comment: "message", need_info: "alert", verify: "refresh", fixed: "check", implemented: "sparkles", news: "megaphone" };
+      const ic = { status: "refresh", comment: "message", need_info: "alert", verify: "refresh", fixed: "check", implemented: "sparkles", news: "megaphone", logs_request: "file" };
       set(view, html`<div class="page-head"><div class="grow"><h1>Уведомления</h1><p>Изменения статусов и ответы команды</p></div>${r.items.some((n) => !n.read) ? html`<button class="btn" id="ra">${I("check")}Прочитать все</button>` : ""}</div>
         ${!S.me.user.tg_linked || !S.me.user.notify_tg || S.me.user.tg_blocked ? html`<a class="callout row" style="--c:var(--accent);color:var(--text)" href="/profile">${I("telegram")}<span>Хотите получать уведомления в Telegram? Подключите его в профиле — это займёт 10 секунд.</span>${I("right", "right")}</a>` : ""}
         <div class="stack stagger">${r.items.length ? r.items.map((n) => html`<button class="notif ${n.read ? "" : "unread"}" data-n="${n.id}" data-href="${n.code ? "/" + (n.kind === "bug" ? "bugs" : "ideas") + "/" + n.code : n.type === "news" ? "/updates" : ""}"><span class="ni">${I(ic[n.type] || "bell")}</span><span style="flex:1;min-width:0"><span class="tx">${n.text}</span><small class="faint" style="display:block;margin-top:4px">${rel(n.created)}${n.code ? " · " + n.code : ""}</small></span>${n.read ? "" : raw('<span class="dot"></span>')}</button>`) : empty("bell", "Уведомлений нет", "Здесь появятся изменения статусов ваших обращений и ответы команды.")}</div>`);

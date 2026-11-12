@@ -273,6 +273,14 @@ const TOOLS = [
     run: async (e, ses, ctx, a) => T.addComment(e, ctx, ses, String(a.code).toUpperCase(), { body: a.text }),
   },
   {
+    name: "request_logs",
+    title: "Запросить журнал",
+    description: "Попросить автора прислать журнал приложения по обращению. Приложение QVK автора (если подключено) при следующем открытии предложит выгрузить журнал и приложит его комментарием; автору также придёт уведомление в Telegram/пуш. Журнал потом смотрите через get_ticket / get_attachment.",
+    annotations: { destructiveHint: false },
+    inputSchema: { type: "object", properties: { code: CODE, text: S({ description: "Текст просьбы (необязательно), например что сделать перед выгрузкой" }) }, required: ["code"] },
+    run: async (e, ses, ctx, a) => T.requestLogs(e, ctx, ses, String(a.code).toUpperCase(), { text: a.text }),
+  },
+  {
     name: "merge_duplicate",
     title: "Объединить дубликаты",
     description: "Отметить source как дубликат target: статус source станет «Дубликат» (для идей — «Отклонено»), подтверждения/голоса перенесутся, автор source получит уведомление.",
